@@ -338,7 +338,7 @@ class BoxReader:
     self._clientBoxDataOffset += copiedBytes
     if not allowShort and copiedBytes != maxRead:
       raise InvalidBmffError(f'Tried to copy {maxRead} bytes of box content, but only ' \
-                            f'copied {bytesCopied}.')
+                            f'copied {copiedBytes}.')
     return copiedBytes
 
   def readCurrentBoxPayload(self, n = -1):
@@ -390,7 +390,7 @@ class BoxReader:
     totalCopied = 0
     availableHeaderBytes = len(self._currentBoxHeader) - self._clientBoxDataOffset
     if availableHeaderBytes > 0:
-      want = min(availableHeaaderBytes, n) if n >= 0 else availableHeaderBytes
+      want = min(availableHeaderBytes, n) if n >= 0 else availableHeaderBytes
       end = self._clientBoxDataOffset + want
       to.write(self._currentBoxHeader[self._clientBoxDataOffset:end])
       self._off += want
@@ -591,7 +591,7 @@ def doList(filenames):
     unnecessary = False
     for i,box in enumerate(boxList):
       sys.stdout.write(f'[{i:0{indexWidth}d}] 0x{box.offset:0{offsetWidth}x} ' \
-                       f'{box.length:{lengthWidth}d} {box.boxtype.decode('ascii', errors='replace')}')
+                       f'{box.length:{lengthWidth}d} {box.boxtype.decode("ascii", errors="replace")}')
       detail = details.get(i)
       if detail:
         sys.stdout.write(f' : {detail}')
@@ -674,7 +674,7 @@ def extractJxlCodestream(src, dst):
         # For the last jxlp box, the sequence number also has the most significant bit set.
         seqNumBytes = reader.readCurrentBoxPayload(4)
         if len(seqNumBytes) != 4:
-          raise InvalidJxlContainerError(f'Invalid length "{boxSize}" for jxlp box.')
+          raise InvalidJxlContainerError(f'Invalid length for jxlp box.')
         (seqNum,) = struct.unpack('>I', seqNumBytes)
         isLastJxlp = (seqNum & 0x80000000) != 0
         if isLastJxlp:
