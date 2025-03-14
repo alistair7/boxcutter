@@ -127,27 +127,27 @@ def addContainer(src, dst, jxll=None, splits=None):
     dst.write(b'\0\0\0\x09jxll' + bytes([jxll]))
 
   if splits is not None:
-    src = CatReader(False, jxlSig, src)
     sortedSplits = list(sorted(splits))
     lastOff = 0
     seqNum = -1
-    for i,off in enumerate(sortedSplits):
-      seqNum = i
-      codestreamSize = off - lastOff
-      size = 12 + codestreamSize
-      if size > 0xFFFFFFFF:
-        extSize = size + 8
-        size = 1
-      else:
-        extSize = 0
-      lastOff = off
+    with CatReader(False, jxlSig, src) as src:
+      for i,off in enumerate(sortedSplits):
+        seqNum = i
+        codestreamSize = off - lastOff
+        size = 12 + codestreamSize
+        if size > 0xFFFFFFFF:
+          extSize = size + 8
+          size = 1
+        else:
+          extSize = 0
+        lastOff = off
 
-      dst.write(struct.pack('>I', size))
-      dst.write(b'jxlp')
-      if extSize > 0:
-        dst.write(struct.pack('>Q', extSize))
-      dst.write(struct.pack('>I', seqNum))
-      copyData(src, dst, codestreamSize)
+        dst.write(struct.pack('>I', size))
+        dst.write(b'jxlp')
+        if extSize > 0:
+          dst.write(struct.pack('>Q', extSize))
+        dst.write(struct.pack('>I', seqNum))
+        copyData(src, dst, codestreamSize)
 
     seqNum = (seqNum + 1) | 0x80000000
     dst.write(b'\0\0\0\0jxlp')
@@ -651,13 +651,11 @@ def extractJxlCodestream(src, dst):
     sys.stderr.write('Input file is not a JPEG XL container.\n')
     return 1
 
-  src = CatReader(False, jxlBox, src)
-
   seenJxlc = False
   seenJbrd = False
   nextJxlp = 0
 
-  with BoxReader(src) as reader:
+  with CatReader(False, jxlBox, src) as src, BoxReader(src) as reader:
     for box in reader:
       if box.boxtype == b'jxlc':
         if seenJxlc or nextJxlp != 0:
