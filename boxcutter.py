@@ -51,55 +51,212 @@ def main(argv):
       if args.mode == 'extract-jxl-codestream':
         return extractJxlCodestream(infile, outfile)
       splits = map(int, args.splits.split(',')) if args.splits else [] if args.splits is not None else None
-      return addContainer(infile, outfile, jxll = None if args.level is None else args.level, splits=splits)
+      return addContainer(infile, outfile, jxll = args.level, splits=splits)
 
   return 0
 
 
-class BoxCutterException(Exception):
-  """Abstract base class for all custom exceptions.""" 
-  pass
+def doList(filenames):
+  multipleFiles = len(filenames) > 1
+  usedStdin = False
+  for fi,filename in enumerate(filenames):
+    if filename == '-':
+      if usedStdin:
+        sys.stderr.write('stdin can only be read once.\n')
+        if fi < len(filenames) - 1: sys.stderr.write('\n')
+        continue
+      usedStdin = True
 
-class InvalidBmffError(BoxCutterException):
-  """File doesn't seem to be in ISO BMFF-like format."""
-  pass
+    with openFileOrStdin(filename, 'rb') as f:
+      firstBytes = f.read(2)
+      if firstBytes == b'\xff\x0a':
+        sys.stdout.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
+        if fi < len(filenames) - 1: sys.stdout.write('\n')
+        continue
 
-class InvalidJxlContainerError(BoxCutterException):
-  """File is not a valid JXL container (but may be valid as some other BMFF format)."""
-  pass
+      # Iterate through boxes in the file, saving metadata and any interesting details.
+      try:
+        boxList = []
+        details = {}
+        invalid = 'invalid?'
+        with CatReader(False, firstBytes, f) as source, BoxReader(source) as reader:
+          for i,box in enumerate(reader):
+            boxList.append(box)
 
-class UsageError(BoxCutterException):
-  """API usage error."""
-  pass
+            if box.boxtype == b'brob':
+              contentStart = reader.readCurrentBoxPayload(4)
+              if len(contentStart) == 4:
+                details[i] = f'Compressed {contentStart.decode("ascii", errors="replace")} box.'
+              else:
+                details[i] = invalid
 
-def copyData(src, dst, count = -1):
-  """
-  Copy @p count bytes from @p src to @p dst.
+            elif box.boxtype == b'Exif':
+              tiffOffsetBytes = reader.readCurrentBoxPayload(4)
+              if len(tiffOffsetBytes) != 4:
+                details[i] = invalid
+                continue
+              (tiffOffset,) = struct.unpack('>I', tiffOffsetBytes)
+              moved = reader.seekCurrentBoxPayload(tiffOffset)
+              if moved != tiffOffset:
+                details[i] = f'TIFF offset is invalid ({tiffOffset}).'
+                continue
+              tiffHeader = reader.readCurrentBoxPayload(4)
+              if tiffHeader not in (b'II\x2A\0', b'MM\0\x2A'):
+                details[i] = f'TIFF header at 0x{tiffOffset:x} is invalid.'
+                continue
+              details[i] = f'{"Big" if tiffHeader[0:1] == b"M" else "Little"}-endian TIFF header at 0x{tiffOffset:x}.'
 
-  @param[in,out] src Open file to read bytes from.
-  @param[in,out] dst Open file to write bytes to.
-  @param[in] count Number of bytes to copy.  If -1, bytes are copied until EOF on @p src.
-  @return The number of bytes copied.
-  """
-  done = 0
-  if count is None: count = -1
+            elif box.boxtype == b'jbrd':
+              details[i] = 'JPEG reconstruction data.'
 
-  # Slow read/write loop
-  # TODO: use os.sendfile on Linux
-  blockSize = 4096
-  while count < 0 or done < count:
-    want = min(blockSize, count-done) if count >= 0 else blockSize
-    block = src.read(want)
-    if len(block) == 0:
-      if count >= 0:
-        raise IOError(f"copyData: tried to copy {count} bytes but actually did {done}")
-      return done
-    dst.write(block)
-    done += len(block)
-  return done
+            elif box.boxtype == b'jxll':
+              levelByte = reader.readCurrentBoxPayload(1)
+              details[i] = 'invalid?' if len(levelByte) != 1 else \
+                           f'JPEG XL conformance level {levelByte[0]}.'
+
+            elif box.boxtype == b'uuid':
+              uuidBytes = reader.readCurrentBoxPayload(16)
+              if len(uuidBytes) == 16:
+                details[i] = str(uuid.UUID(bytes=uuidBytes))
+              else:
+                details[i] = invalid
+
+          boxList[-1].length = reader.finalBoxSize()
+      except Exception as ex:
+        sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format; {ex}.\n')
+        if fi < len(filenames) - 1: sys.stderr.write('\n')
+        continue
+
+    if len(boxList) == 0:
+      sys.stdout.write(f'{shlex.quote(filename)}: Empty file.\n')
+      if fi < len(filenames) - 1: sys.stdout.write('\n')
+      continue
+
+    largestOffset = 0x100 # Force minimum 3 digits so the "0x" and headings always fit
+    largestLength = 100
+    boxData = []
+    for box in boxList:
+      if box.offset > largestOffset: largestOffset = box.offset
+      if box.length > largestLength: largestLength = box.length
+
+    indexWidth = math.floor(math.log10(len(boxList))) + 1;
+    offsetWidth = math.floor(math.log(largestOffset, 16)) + 1;
+    lengthWidth = math.floor(math.log10(largestLength)) + 1;
+
+    if multipleFiles:
+      sys.stdout.write(f'{shlex.quote(filename)}:\n')
+    headings = f'seq{" "*indexWidth}{"off":<{offsetWidth}}   {"len":>{lengthWidth}} type\n'
+    sys.stdout.write(headings)
+    sys.stdout.write('-' * (len(headings)-1) + '\n')
+    unnecessary = False
+    for i,box in enumerate(boxList):
+      sys.stdout.write(f'[{i:0{indexWidth}d}] 0x{box.offset:0{offsetWidth}x} ' \
+                       f'{box.length:{lengthWidth}d} {box.boxtype.decode("ascii", errors="replace")}')
+      detail = details.get(i)
+      if detail:
+        sys.stdout.write(f' : {detail}')
+      if box.hasExtendedSize and box.length <= 0xFFFFFFFF:
+        sys.stdout.write(' *')
+        unnecessary = True
+      sys.stdout.write('\n')
+    if unnecessary:
+      sys.stdout.write('\n  *Unnecessary use of extended box size wastes 8 bytes.\n')
+    if fi < len(filenames) - 1: sys.stdout.write('\n')
+  return 0
 
 
+def doCount(filenames, type=None):
+  multipleFiles = len(filenames) > 1
+  usedStdin = False
+  for i,filename in enumerate(filenames):
+    if filename == '-':
+      if usedStdin:
+        sys.stderr.write('stdin can only be read once.\n')
+        if i < len(filenames) - 1: sys.stderr.write('\n')
+        continue
+      usedStdin = True
 
+    with openFileOrStdin(filename, 'rb') as f:
+      firstBytes = f.read(2)
+      if firstBytes == b'\xff\x0a':
+        sys.stderr.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
+        continue
+
+      count = 0
+      try:
+        with CatReader(False, firstBytes, f) as source, BoxReader(source) as reader:
+          for box in reader:
+            if type is None or box.boxtype.decode('ascii', errors='replace') == type:
+              count += 1
+      except Exception as ex:
+        sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format; {ex}.\n')
+        continue
+
+    if multipleFiles:
+      sys.stdout.write(f'{shlex.quote(filename)}: ')
+    sys.stdout.write(str(count))
+    sys.stdout.write('\n')
+
+  return 0
+
+def extractJxlCodestream(src, dst):
+
+  jxlBox = src.read(len(JXL_CONTAINER_SIG))
+  if jxlBox != JXL_CONTAINER_SIG:
+    sys.stderr.write('Input file is not a JPEG XL container.\n')
+    return 1
+
+  seenJxlc = False
+  seenJbrd = False
+  nextJxlp = 0
+
+  with CatReader(False, jxlBox, src) as src, BoxReader(src) as reader:
+    for box in reader:
+      if box.boxtype == b'jxlc':
+        if seenJxlc or nextJxlp != 0:
+          raise InvalidJxlContainerError('Multiple `jxlc` boxes in input.')
+        seenJxlc = True
+        reader.copyCurrentBoxPayload(dst)
+        continue
+
+      if box.boxtype == b'jxlp':
+        if seenJxlc or nextJxlp < 0:
+          raise InvalidJxlContainerError('Unexpected `jxlp` box.')
+
+        # Each jxlp starts with an int32be sequence number starting at 0.
+        # For the last jxlp box, the sequence number also has the most significant bit set.
+        seqNumBytes = reader.readCurrentBoxPayload(4)
+        if len(seqNumBytes) != 4:
+          raise InvalidJxlContainerError(f'Invalid length for jxlp box.')
+        (seqNum,) = struct.unpack('>I', seqNumBytes)
+        isLastJxlp = (seqNum & 0x80000000) != 0
+        if isLastJxlp:
+          seqNum &= 0x7FFFFFFF
+        if seqNum != nextJxlp:
+          sys.stderr.write(f'jxlp box out of sequence: expected {nextJxlp}; got {seqNum}{" (last)" if isLastJxlp else ""}')
+          return 2
+        nextJxlp = -1 if isLastJxlp else (nextJxlp + 1)
+        done = reader.copyCurrentBoxPayload(dst)
+        continue;
+
+      if not seenJbrd and box.boxtype == b'jbrd':
+        sys.stderr.write('Warning: input contains JPEG reconstruction data.\n')
+        sys.stderr.write('It will not be possible to losslessly reconstruct a JPEG from the raw codestream.\n')
+        seenJbrd = True
+
+      elif box.boxtype == b'jxll':
+        levelByte = reader.readCurrentBoxPayload(1)
+        if len(levelByte) != 1:
+          return 2
+        if levelByte[0] > 5:
+          sys.stderr.write(f'Warning: the input declares a level {levelByte[0]} codestream.\n')
+          sys.stderr.write(f'A raw codestream should not use features that require level > 5.\n')
+
+
+  if nextJxlp > 0:
+    sys.stderr.write(f'Warning: the last jxlp box was not marked as being the last jxlp box.\n')
+
+  return 0 if (seenJxlc or nextJxlp != 0) else 1
 
 def addContainer(src, dst, jxll=None, splits=None):
   """
@@ -159,6 +316,58 @@ def addContainer(src, dst, jxll=None, splits=None):
     dst.write(b'\0\0\0\0jxlc' + jxlSig)
     copyData(src, dst, None)
     return 0
+
+
+def openFileOrStdin(name, *args, **kwargs):
+  return (sys.stdin.buffer if name == '-' else open(name, *args, **kwargs))
+
+def openFileOrStdout(name, *args, **kwargs):
+  return (sys.stdout.buffer if name == '-' else open(name, *args, **kwargs))
+
+def copyData(src, dst, count = -1):
+  """
+  Copy @p count bytes from @p src to @p dst.
+
+  @param[in,out] src Open file to read bytes from.
+  @param[in,out] dst Open file to write bytes to.
+  @param[in] count Number of bytes to copy.  If -1, bytes are copied until EOF on @p src.
+  @return The number of bytes copied.
+  """
+  done = 0
+  if count is None: count = -1
+
+  # Slow read/write loop
+  # TODO: use os.sendfile on Linux
+  blockSize = 4096
+  while count < 0 or done < count:
+    want = min(blockSize, count-done) if count >= 0 else blockSize
+    block = src.read(want)
+    if len(block) == 0:
+      if count >= 0:
+        raise IOError(f"copyData: tried to copy {count} bytes but actually did {done}")
+      return done
+    dst.write(block)
+    done += len(block)
+  return done
+
+
+
+
+class BoxCutterException(Exception):
+  """Abstract base class for all custom exceptions."""
+  pass
+
+class InvalidBmffError(BoxCutterException):
+  """File doesn't seem to be in ISO BMFF-like format."""
+  pass
+
+class InvalidJxlContainerError(BoxCutterException):
+  """File is not a valid JXL container (but may be valid as some other BMFF format)."""
+  pass
+
+class UsageError(BoxCutterException):
+  """API usage error."""
+  pass
 
 class BoxDetails:
   """
@@ -491,219 +700,6 @@ class BoxReader:
     return done
 
 
-def doList(filenames):
-  multipleFiles = len(filenames) > 1
-  usedStdin = False
-  for fi,filename in enumerate(filenames):
-    try:
-      if filename == '-':
-        if usedStdin:
-          sys.stderr.write('stdin can only be read once.\n')
-          if fi < len(filenames) - 1: sys.stderr.write('\n')
-          continue
-        usedStdin = True
-        f = sys.stdin.buffer
-      else:
-        f = open(filename, 'rb')
-      firstBytes = f.read(2)
-      if firstBytes == b'\xff\x0a':
-        sys.stdout.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
-        if fi < len(filenames) - 1: sys.stdout.write('\n')
-        continue
-
-      # Iterate through boxes in the file, saving metadata and any interesting details.
-      try:
-        boxList = []
-        details = {}
-        invalid = 'invalid?'
-        with CatReader(False, firstBytes, f) as source, BoxReader(source) as reader:
-          for i,box in enumerate(reader):
-            boxList.append(box)
-
-            if box.boxtype == b'brob':
-              contentStart = reader.readCurrentBoxPayload(4)
-              if len(contentStart) == 4:
-                details[i] = f'Compressed {contentStart.decode("ascii", errors="replace")} box.'
-              else:
-                details[i] = invalid
-
-            elif box.boxtype == b'Exif':
-              tiffOffsetBytes = reader.readCurrentBoxPayload(4)
-              if len(tiffOffsetBytes) != 4:
-                details[i] = invalid
-                continue
-              (tiffOffset,) = struct.unpack('>I', tiffOffsetBytes)
-              moved = reader.seekCurrentBoxPayload(tiffOffset)
-              if moved != tiffOffset:
-                details[i] = f'TIFF offset is invalid ({tiffOffset}).'
-                continue
-              tiffHeader = reader.readCurrentBoxPayload(4)
-              if tiffHeader not in (b'II\x2A\0', b'MM\0\x2A'):
-                details[i] = f'TIFF header at 0x{tiffOffset:x} is invalid.'
-                continue
-              details[i] = f'{"Big" if tiffHeader[0:1] == b"M" else "Little"}-endian TIFF header at 0x{tiffOffset:x}.'
-
-            elif box.boxtype == b'jbrd':
-              details[i] = 'JPEG reconstruction data.'
-
-            elif box.boxtype == b'jxll':
-              levelByte = reader.readCurrentBoxPayload(1)
-              details[i] = 'invalid?' if len(levelByte) != 1 else \
-                           f'JPEG XL conformance level {levelByte[0]}.'
-
-            elif box.boxtype == b'uuid':
-              uuidBytes = reader.readCurrentBoxPayload(16)
-              if len(uuidBytes) == 16:
-                details[i] = str(uuid.UUID(bytes=uuidBytes))
-              else:
-                details[i] = invalid
-
-          boxList[-1].length = reader.finalBoxSize()
-      except Exception as ex:
-        sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format; {ex}.\n')
-        if fi < len(filenames) - 1: sys.stderr.write('\n')
-        continue
-
-    finally:
-      if filename != '-':
-        f.close()
-
-    if len(boxList) == 0:
-      sys.stdout.write(f'{shlex.quote(filename)}: Empty file.\n')
-      if fi < len(filenames) - 1: sys.stdout.write('\n')
-      continue
-
-    largestOffset = 0x100 # Force minimum 3 digits so the "0x" and headings always fit
-    largestLength = 100
-    boxData = []
-    for box in boxList:
-      if box.offset > largestOffset: largestOffset = box.offset
-      if box.length > largestLength: largestLength = box.length
-
-    indexWidth = math.floor(math.log10(len(boxList))) + 1;
-    offsetWidth = math.floor(math.log(largestOffset, 16)) + 1;
-    lengthWidth = math.floor(math.log10(largestLength)) + 1;
-
-    if multipleFiles:
-      sys.stdout.write(f'{shlex.quote(filename)}:\n')
-    headings = f'seq{" "*indexWidth}{"off":<{offsetWidth}}   {"len":>{lengthWidth}} type\n'
-    sys.stdout.write(headings)
-    sys.stdout.write('-' * (len(headings)-1) + '\n')
-    unnecessary = False
-    for i,box in enumerate(boxList):
-      sys.stdout.write(f'[{i:0{indexWidth}d}] 0x{box.offset:0{offsetWidth}x} ' \
-                       f'{box.length:{lengthWidth}d} {box.boxtype.decode("ascii", errors="replace")}')
-      detail = details.get(i)
-      if detail:
-        sys.stdout.write(f' : {detail}')
-      if box.hasExtendedSize and box.length <= 0xFFFFFFFF:
-        sys.stdout.write(' *')
-        unnecessary = True
-      sys.stdout.write('\n')
-    if unnecessary:
-      sys.stdout.write('\n  *Unnecessary use of extended box size wastes 8 bytes.\n')
-    if fi < len(filenames) - 1: sys.stdout.write('\n')
-  return 0
-
-
-def doCount(filenames, type=None):
-  multipleFiles = len(filenames) > 1
-  usedStdin = False
-  for filename in filenames:
-    try:
-      if filename == '-':
-        if usedStdin:
-          sys.stderr.write('stdin can only be read once.\n')
-          continue
-        usedStdin = True
-        f = sys.stdin.buffer
-      else:
-        f = open(filename, 'rb')
-      firstBytes = f.read(2)
-      if firstBytes == b'\xff\x0a':
-        sys.stderr.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
-        continue
-
-      count = 0
-      try:
-        with CatReader(False, firstBytes, f) as source, BoxReader(source) as reader:
-          for box in reader:
-            if type is None or box.boxtype.decode('ascii', errors='replace') == type:
-              count += 1
-      except Exception as ex:
-        sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format; {ex}.\n')
-        continue
-
-    finally:
-      if filename != '-':
-        f.close()
-
-    if multipleFiles:
-      sys.stdout.write(f'{shlex.quote(filename)}: ')
-    sys.stdout.write(str(count))
-    sys.stdout.write('\n')
-
-  return 0
-
-def extractJxlCodestream(src, dst):
-
-  jxlBox = src.read(len(JXL_CONTAINER_SIG))
-  if jxlBox != JXL_CONTAINER_SIG:
-    sys.stderr.write('Input file is not a JPEG XL container.\n')
-    return 1
-
-  seenJxlc = False
-  seenJbrd = False
-  nextJxlp = 0
-
-  with CatReader(False, jxlBox, src) as src, BoxReader(src) as reader:
-    for box in reader:
-      if box.boxtype == b'jxlc':
-        if seenJxlc or nextJxlp != 0:
-          raise InvalidJxlContainerError('Multiple `jxlc` boxes in input.')
-        seenJxlc = True
-        reader.copyCurrentBoxPayload(dst)
-        continue
-
-      if box.boxtype == b'jxlp':
-        if seenJxlc or nextJxlp < 0:
-          raise InvalidJxlContainerError('Unexpected `jxlp` box.')
-
-        # Each jxlp starts with an int32be sequence number starting at 0.
-        # For the last jxlp box, the sequence number also has the most significant bit set.
-        seqNumBytes = reader.readCurrentBoxPayload(4)
-        if len(seqNumBytes) != 4:
-          raise InvalidJxlContainerError(f'Invalid length for jxlp box.')
-        (seqNum,) = struct.unpack('>I', seqNumBytes)
-        isLastJxlp = (seqNum & 0x80000000) != 0
-        if isLastJxlp:
-          seqNum &= 0x7FFFFFFF
-        if seqNum != nextJxlp:
-          sys.stderr.write(f'jxlp box out of sequence: expected {nextJxlp}; got {seqNum}{" (last)" if isLastJxlp else ""}')
-          return 2
-        nextJxlp = -1 if isLastJxlp else (nextJxlp + 1)
-        done = reader.copyCurrentBoxPayload(dst)
-        continue;
-
-      if not seenJbrd and box.boxtype == b'jbrd':
-        sys.stderr.write('Warning: input contains JPEG reconstruction data.\n')
-        sys.stderr.write('It will not be possible to losslessly reconstruct a JPEG from the raw codestream.\n')
-        seenJbrd = True
-
-      elif box.boxtype == b'jxll':
-        levelByte = reader.readCurrentBoxPayload(1)
-        if len(levelByte) != 1:
-          return 2
-        if levelByte[0] > 5:
-          sys.stderr.write(f'Warning: the input declares a level {levelByte[0]} codestream.\n')
-          sys.stderr.write(f'A raw codestream should not use features that require level > 5.\n')
-
-
-  if nextJxlp > 0:
-    sys.stderr.write(f'Warning: the last jxlp box was not marked as being the last jxlp box.\n')
-
-  return 0 if (seenJxlc or nextJxlp != 0) else 1
-
 
 class CatReader:
   """
@@ -848,10 +844,7 @@ class CatReader:
   def writable(self): return False
   def fileno(self): raise OSError('CatReader does not have a fileno.')
 
-def openFileOrStdin(name, *args, **kwargs):
-  return (sys.stdin.buffer if name == '-' else open(name, *args, **kwargs))
-def openFileOrStdout(name, *args, **kwargs):
-  return (sys.stdout.buffer if name == '-' else open(name, *args, **kwargs))
+
 
 if __name__ == '__main__':
   sys.exit(main(sys.argv))
