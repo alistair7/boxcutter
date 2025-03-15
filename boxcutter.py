@@ -28,14 +28,12 @@ def main(argv):
   countParser.add_argument('files', nargs='*')
 
   extractJxlParser = subparsers.add_parser('extract-jxl-codestream', help='Extract the raw JPEG XL codestream from a JXL container file.')
-  extractJxlParser.add_argument('infile')
-  extractJxlParser.add_argument('outfile')
+  extractJxlParser.add_argument('filenames', nargs='*', help='One input file and one output file; omit both to use stdin and stdout, respectively.')
 
   wrapJxlParser = subparsers.add_parser('wrap-jxl-codestream', help='Wrap a raw JPEG XL codestream in a simple ISO/IEC 18181-2 "BMFF-like" container.')
   wrapJxlParser.add_argument('--level', '-l', type=int, metavar='N', help='Add a codestream level declaration to the file, for level N (adds a `jxll` box to the output).')
   wrapJxlParser.add_argument('--splits', '-s', metavar='OFFSET,OFFSET,...', help='Write several `jxlp` boxes instead of a single `jxlc` box, splitting the codestream at these byte offsets.')
-  wrapJxlParser.add_argument('infile')
-  wrapJxlParser.add_argument('outfile')
+  wrapJxlParser.add_argument('filenames', nargs='*', help='One input file and one output file; omit both to use stdin and stdout, respectively.')
 
   args = parser.parse_args(argv[1:])
 
@@ -43,14 +41,17 @@ def main(argv):
     return doList(args.files)
   elif args.mode == 'count':
     return doCount(args.files, args.type)
-  elif args.mode == 'extract-jxl-codestream':
-    with open(args.infile, 'rb') as container, open(args.outfile, 'wb') as rawjxl:
-      return extractJxlCodestream(container, rawjxl)
-  elif args.mode == 'wrap-jxl-codestream':
-    splits = map(int, args.splits.split(',')) if args.splits else [] if args.splits is not None else None
-    with (sys.stdin.buffer if args.infile == '-' else open(args.infile, 'rb')) as src, \
-         (sys.stdout.buffer if args.outfile == '-' else open(args.outfile, 'wb')) as dst:
-      return addContainer(src, dst, jxll = None if args.level is None else args.level, splits=splits)
+  elif args.mode in ('extract-jxl-codestream', 'wrap-jxl-codestream'):
+    if len(args.filenames) == 0:
+      args.filenames = ['-', '-']
+    elif len(args.filenames) != 2:
+      sys.stderr.write(f'Error: {args.mode} requires one input and one output file.\n')
+    with openFileOrStdin(args.filenames[0], 'rb') as infile, \
+         openFileOrStdout(args.filenames[1], 'wb') as outfile:
+      if args.mode == 'extract-jxl-codestream':
+        return extractJxlCodestream(infile, outfile)
+      splits = map(int, args.splits.split(',')) if args.splits else [] if args.splits is not None else None
+      return addContainer(infile, outfile, jxll = None if args.level is None else args.level, splits=splits)
 
   return 0
 
@@ -846,6 +847,11 @@ class CatReader:
   def seekable(self): return False
   def writable(self): return False
   def fileno(self): raise OSError('CatReader does not have a fileno.')
+
+def openFileOrStdin(name, *args, **kwargs):
+  return (sys.stdin.buffer if name == '-' else open(name, *args, **kwargs))
+def openFileOrStdout(name, *args, **kwargs):
+  return (sys.stdout.buffer if name == '-' else open(name, *args, **kwargs))
 
 if __name__ == '__main__':
   sys.exit(main(sys.argv))
