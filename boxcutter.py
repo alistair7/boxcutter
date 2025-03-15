@@ -307,10 +307,10 @@ def addContainer(src, dst, jxll=None, splits=None):
         dst.write(struct.pack('>I', seqNum))
         copyData(src, dst, codestreamSize)
 
-    seqNum = (seqNum + 1) | 0x80000000
-    dst.write(b'\0\0\0\0jxlp')
-    dst.write(struct.pack('>I', seqNum))
-    copyData(src, dst, None)
+      seqNum = (seqNum + 1) | 0x80000000
+      dst.write(b'\0\0\0\0jxlp')
+      dst.write(struct.pack('>I', seqNum))
+      copyData(src, dst, None)
 
   else:
     dst.write(b'\0\0\0\0jxlc' + jxlSig)
