@@ -15,6 +15,9 @@ import uuid
 
 JXL_CONTAINER_SIG = b'\0\0\0\x0cJXL \r\n\x87\n'
 
+# Boxes bigger than this require extended box size
+BIG_SIZE = 0xFFFFFFFF
+
 def main(argv):
   import argparse
   parser = argparse.ArgumentParser()
@@ -121,7 +124,10 @@ def doList(filenames):
               else:
                 details[i] = invalid
 
-          boxList[-1].length = reader.finalBoxSize()
+          zeroLengthLastBox = False
+          if boxList[-1].length == 0:
+            zeroLengthLastBox = True
+            boxList[-1].length = reader.finalBoxSize()
       except Exception as ex:
         sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format; {ex}.\n')
         if fi < len(filenames) - 1: sys.stderr.write('\n')
@@ -141,7 +147,7 @@ def doList(filenames):
 
     indexWidth = math.floor(math.log10(len(boxList))) + 1;
     offsetWidth = math.floor(math.log(largestOffset, 16)) + 1;
-    lengthWidth = math.floor(math.log10(largestLength)) + 1;
+    lengthWidth = math.floor(math.log10(largestLength)) + 2;
 
     if multipleFiles:
       sys.stdout.write(f'{shlex.quote(filename)}:\n')
@@ -150,12 +156,17 @@ def doList(filenames):
     sys.stdout.write('-' * (len(headings)-1) + '\n')
     unnecessary = False
     for i,box in enumerate(boxList):
-      sys.stdout.write(f'[{i:0{indexWidth}d}] 0x{box.offset:0{offsetWidth}x} ' \
-                       f'{box.length:{lengthWidth}d} {box.boxtype.decode("ascii", errors="replace")}')
+      hasImplicitLength = (i == len(boxList) - 1) and zeroLengthLastBox
+      sys.stdout.write(f'[{i:0{indexWidth}d}] 0x{box.offset:0{offsetWidth}x} ')
+      if hasImplicitLength:
+        sys.stdout.write(f'{box.length:+{lengthWidth}d}')
+      else:
+        sys.stdout.write(f'{box.length:{lengthWidth}d}')
+      sys.stdout.write(f' {box.boxtype.decode("ascii", errors="replace")}')
       detail = details.get(i)
       if detail:
         sys.stdout.write(f' : {detail}')
-      if box.hasExtendedSize and box.length <= 0xFFFFFFFF:
+      if box.hasExtendedSize and (box.length <= BIG_SIZE or hasImplicitLength):
         sys.stdout.write(' *')
         unnecessary = True
       sys.stdout.write('\n')
@@ -272,7 +283,8 @@ def addContainer(src, dst, jxll=None, splits=None):
                     codestream.  We have no way of identifying a suitable split point, so
                     this is entirely up to the caller.)
   """
-  jxlSig = src.read(2)
+  codestreamBytesRemain = streamSize(src)
+  jxlSig = src.read(2) # Effectively peeking, so don't decrement codestreamBytesRemain
   if jxlSig != b'\xff\n':
     if jxlSig == JXL_CONTAINER_SIG[:2] and src.read(len(JXL_CONTAINER_SIG)-2) == JXL_CONTAINER_SIG[2:]:
       sys.stderr.write('Input is already in a container.\n')
@@ -291,9 +303,9 @@ def addContainer(src, dst, jxll=None, splits=None):
     with CatReader(False, jxlSig, src) as src:
       for i,off in enumerate(sortedSplits):
         seqNum = i
-        codestreamSize = off - lastOff
-        size = 12 + codestreamSize
-        if size > 0xFFFFFFFF:
+        chunkSize = off - lastOff
+        size = 12 + chunkSize
+        if size > BIG_SIZE:
           extSize = size + 8
           size = 1
         else:
@@ -305,24 +317,64 @@ def addContainer(src, dst, jxll=None, splits=None):
         if extSize > 0:
           dst.write(struct.pack('>Q', extSize))
         dst.write(struct.pack('>I', seqNum))
-        copyData(src, dst, codestreamSize)
+        codestreamBytesRemain -= copyData(src, dst, chunkSize)
 
       seqNum = (seqNum + 1) | 0x80000000
-      dst.write(b'\0\0\0\0jxlp')
-      dst.write(struct.pack('>I', seqNum))
-      copyData(src, dst, None)
 
+      payloadSize = (4 + codestreamBytesRemain) if codestreamBytesRemain >= 0 else -1
+      lastBoxSize = writeBoxHeader(dst, b'jxlp', payloadSize) + \
+                    dst.write(struct.pack('>I', seqNum)) + \
+                    copyData(src, dst, None)
   else:
-    dst.write(b'\0\0\0\0jxlc' + jxlSig)
-    copyData(src, dst, None)
-    return 0
+    lastBoxSize = writeBoxHeader(dst, b'jxlc', codestreamBytesRemain) + \
+                  copyData(src, dst, None)
 
+  # If the input wasn't seekable but the output is, we may now be able to set the last
+  # box's size field.
+  if codestreamBytesRemain < 0 and lastBoxSize <= BIG_SIZE and dst.seekable():
+    fileEnd = dst.tell()
+    dst.seek(-lastBoxSize, os.SEEK_CUR)
+    dst.write(struct.pack('>I', lastBoxSize))
+    dst.seek(fileEnd)
+  return 0
+
+def writeBoxHeader(to, boxtype, payloadSize):
+  """
+  Write the header of a @p boxtype box to an open file, @p to.
+
+  If payloadSize is < 0, the size field is set to zero.
+  @return the number of bytes written (8 or 16, depending on the declared payload size).
+  """
+  if payloadSize < 0:
+    # Only valid if this the last box
+    return to.write(b'\0\0\0\0') + \
+           to.write(boxtype)
+  boxSize = 8 + payloadSize
+  if boxSize <= BIG_SIZE:
+    return to.write(struct.pack('>I', boxSize)) + \
+           to.write(boxtype)
+  boxSize += 8
+  return to.write(b'\0\0\0\x01') + \
+         to.write(boxtype) + \
+         to.write(struct.pack('>Q', boxSize))
 
 def openFileOrStdin(name, *args, **kwargs):
   return (sys.stdin.buffer if name == '-' else open(name, *args, **kwargs))
 
 def openFileOrStdout(name, *args, **kwargs):
   return (sys.stdout.buffer if name == '-' else open(name, *args, **kwargs))
+
+def streamSize(f):
+  """
+  Return the full size in bytes of the open file, @p f, using seek/tell.
+  If the file isn't seekable, return -1.
+  """
+  if not f.seekable(): return -1
+  # Unlike C's ftell(), Python's tell() is safe to use as a byte offset for binary files.
+  pos = f.tell()
+  end = f.seek(0, io.SEEK_END)
+  f.seek(pos)
+  return end
 
 def copyData(src, dst, count = -1):
   """
@@ -476,7 +528,11 @@ class BoxReader:
     self._clientIsReadingFull = self._clientIsReadingPayload = False
 
     # Read the box header
-    self._currentBoxHeader = self._read(8, allowZero=True)
+    try:
+      self._currentBoxHeader = self._read(8, allowZero=True)
+    except InvalidBmffError as ex:
+      sys.stderr.write(f'Truncated header for box index {self._index}.\n')
+      raise
     if len(self._currentBoxHeader) == 0:
       # No more boxes
       self._eof = True
@@ -518,8 +574,8 @@ class BoxReader:
     if self._currentBoxDetail.length > 0: return self._currentBoxDetail.length
 
     while True:
-      did = self._seekBy(0xFFFFFFFF, exact=False)
-      if did < 0xFFFFFFFF:
+      did = self._seekBy(0x7FFFFFFF, exact=False)
+      if did < 0x7FFFFFFF:
         self._currentBoxDetail.length = self._off - self._currentBoxDetail.offset
         return self._currentBoxDetail.length
 
