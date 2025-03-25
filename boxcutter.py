@@ -39,13 +39,24 @@ def main(argv):
   wrapJxlParser.add_argument('--splits', '-s', metavar='OFFSET,OFFSET,...', help='Write several `jxlp` boxes instead of a single `jxlc` box, splitting the codestream at these byte offsets.')
   wrapJxlParser.add_argument('filenames', nargs='*', help='One input file and one output file; omit both to use stdin and stdout, respectively.')
 
+  addParser = subparsers.add_parser('add', help='Add one or more metadata boxes to the file.')
+  addParser.add_argument('--at', default=-1, type=int, help='Position to insert the boxes.  Valid indexes range from 0 to the current box count.  Default is -1, which appends the new boxes.')
+  addParser.add_argument('--box', action='append',
+                         help='Box specifier in the format "TYPE=DATA" ' \
+                              '(to create a box of type TYPE with content DATA) or ' \
+                              '"TYPE@FILE" (to set the box content from a file named ' \
+                              'FILE.  FILE may be \'-\' to read box content from stdin.' \
+                              '  Boxes are added in the order they are passed.')
+  addParser.add_argument('--encoding', default='UTF-8', help='When setting box content from the command line (TYPE=...), encode the text value using this character encoding.  Default is UTF-8.')
+  addParser.add_argument('filenames', nargs='*', help='One input file and one output file; omit both to use stdin and stdout, respectively.')
+
   args = parser.parse_args(argv[1:])
 
   if args.mode == 'list':
     return doList(args.files)
   elif args.mode == 'count':
     return doCount(args.files, args.type)
-  elif args.mode in ('extract-jxl-codestream', 'wrap-jxl-codestream'):
+  elif args.mode in ('extract-jxl-codestream', 'wrap-jxl-codestream', 'add'):
     if len(args.filenames) == 0:
       args.filenames = ['-', '-']
     elif len(args.filenames) != 2:
@@ -54,8 +65,10 @@ def main(argv):
          openFileOrStdout(args.filenames[1], 'wb') as outfile:
       if args.mode == 'extract-jxl-codestream':
         return extractJxlCodestream(infile, outfile)
-      splits = map(int, args.splits.split(',')) if args.splits else [] if args.splits is not None else None
-      return addContainer(infile, outfile, jxll = args.level, splits=splits)
+      if args.mode == 'wrap-jxl-codestream':
+        splits = map(int, args.splits.split(',')) if args.splits else [] if args.splits is not None else None
+        return addContainer(infile, outfile, jxll = args.level, splits=splits)
+      return doAddBoxes(infile, outfile, args.box, args.encoding, args.at)
 
   return 0
 
@@ -339,6 +352,136 @@ def addContainer(src, dst, jxll=None, splits=None):
     dst.write(struct.pack('>I', lastBoxSize))
     dst.seek(fileEnd)
   return 0
+
+
+def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
+  stdinCount = sum(map(lambda x : 1 if (x[4:] == '@-') else 0, newboxes)) + \
+               (1 if infile == sys.stdin.buffer else 0)
+  if stdinCount > 1:
+    sys.stderr.write('Error: stdin can only be used once in a single command.\n')
+    return 1
+
+  with BoxReader(infile) as reader:
+
+    appendingBoxes = len(newboxes) > 0
+    originalBytesCopied = 0
+    i = 0
+
+    for i,box in enumerate(reader):
+      if i == at:
+        # Insert the boxes here
+        _writeBoxes(outfile, newboxes, encoding, atEnd=False)
+        appendingBoxes = False
+
+      # Copy the existing box.
+      if box.length == 0:
+        # Last box has its size field set to 0.  If we're appending boxes after this, we
+        # must set the size explicitly, but even if we're not, try anyway.
+
+        # If input size is known, we can work out how many bytes are left.
+        fullInputSize = streamSize(infile)
+        if fullInputSize != -1:
+          payloadSize = fullInputSize - originalBytesCopied - (16 if box.hasExtendedSize else 8)
+          sys.stderr.write(f'Calculated last box payload size is {fullInputSize} - {originalBytesCopied} - {16 if box.hasExtendedSize else 8} = {payloadSize}.\n')
+          originalBytesCopied += writeBoxHeader(outfile, box.boxtype, payloadSize)
+          payloadWrote = reader.copyCurrentBoxPayload(outfile)
+          originalBytesCopied += payloadWrote
+          if payloadWrote != payloadSize:
+            sys.stderr.write("Error: Failed to calculate size of the (former) last " \
+                             f"box.  We expected it to be {payloadSize}, but we wrote " \
+                             f"{payloadWrote}.\n")
+            return 1
+          break
+
+        # If the output is seekable, set a placeholder and update the size later.
+        if outfile.seekable():
+          outBoxOffset = outfile.tell()
+          reader.copyCurrentBox(outfile)
+          boxEnd = outfile.tell()
+          outfile.seek(outBoxOffset)
+          newBoxSize = boxEnd - outBoxOffset
+          if box.hasExtendedSize:
+            # Unsure whether using an extended box size to store 0 is valid, but deal with it anyway.
+            outfile.seek(outBoxOffset + 8)
+            outfile.write(struct.pack('>Q', newBoxSize))
+          else:
+            if newBoxSize > BIG_SIZE:
+              # TODO: Handle big boxes
+              sys.stderr.write(f'Adding (final) boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.\n')
+            outfile.write(struct.pack('>I', newBoxSize))
+          outfile.seek(boxEnd)
+          break
+
+        # Otherwise we can't set an explicit size
+        if appendingBoxes:
+          sys.stderr.write("Error: either the input file or the output file must be " \
+                           "seekable to set the (former) last box size correctly.\n")
+          return 1
+
+      # Copy the entire box
+      originalBytesCopied += reader.copyCurrentBox(outfile)
+
+    if at > i+1:
+      sys.stderr.write(f"Error: can't insert boxes at position {at}; box count is {i+1}.\n")
+      return 1
+
+    if appendingBoxes:
+      _writeBoxes(outfile, newboxes, encoding, atEnd=True)
+  return 0
+
+def _writeBoxes(outfile, boxes, encoding, atEnd):
+  """
+  Write boxes at the current position.
+
+  @param outfile Open binary file.
+  @param boxes List of box descriptor strings.
+  @param encoding Character encoding to use if box content is directly specified as text.
+  @param atEnd Should be True if these boxes are going to be at the end of the file, which
+               gives us the option of not specifying the size of the last box.
+  @return The number of bytes written, or -1 on error.
+  """
+  wrote = 0
+  for boxi,newBox in enumerate(boxes):
+    newType = newBox[:4]
+    newMethod = newBox[4:5]
+    newDataSource = newBox[5:]
+    if len(newType) != 4 or newMethod not in ('=','@'):
+      sys.stderr.write(f'Invalid box specifier: {shlex.quote(newBox)}.\n')
+      return -1
+
+    if newMethod == '=':
+      data = newDataSource.encode(encoding)
+      wrote += writeBoxHeader(outfile, newType.encode('ASCII'), len(data)) + \
+               outfile.write(data)
+      continue
+
+    with openFileOrStdin(newDataSource, 'rb') as inbox:
+      dataSize = streamSize(inbox)
+
+      if dataSize == -1:
+        if (not atEnd or boxi != len(boxes)-1) and not outfile.seekable():
+          sys.stderr.write("Error: output isn't seekable, and the box size can't be "
+                           "determined in advance.\n")
+          return -1
+        if outfile.seekable():
+          # Bookmark the size field so we can come back and update it later
+          outBoxOffset = outfile.tell()
+
+      wrote += writeBoxHeader(outfile, newType.encode('ASCII'), dataSize) + \
+               copyData(inbox, outfile, dataSize)
+
+      if dataSize == -1 and outfile.seekable():
+        boxEnd = outfile.tell()
+        outfile.seek(outBoxOffset)
+        newBoxSize = boxEnd - outBoxOffset
+        if newBoxSize > BIG_SIZE:
+          # TODO: Handle big boxes
+          sys.stderr.write(f'Adding boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.\n')
+          return 1
+        outfile.write(struct.pack('>I', newBoxSize))
+        outfile.seek(boxEnd)
+  return wrote
+
 
 def writeBoxHeader(to, boxtype, payloadSize):
   """
