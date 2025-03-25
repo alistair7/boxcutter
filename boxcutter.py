@@ -945,7 +945,7 @@ class CatReader:
     return self
 
   def __exit__(self, exc_type, exc_value, traceback):
-    if self._eof: return
+    if self.closed: return
     self.close()
 
   def close(self):
@@ -956,7 +956,7 @@ class CatReader:
     self._eof = True
     self.closed = True
 
-  def read(self, n):
+  def read(self, n=-1):
     if n is None or n == -1: return self.readall()
     if self._eof: return b''
     stillWant = n
@@ -972,7 +972,9 @@ class CatReader:
       if self._currentFileIx == len(self._files) - 1:
         self._eof = True
         return returndata
-      if self._mustClose[self._currentFileIx]: self._files[self._currentFileIx].close()
+      if self._mustClose[self._currentFileIx]:
+        self._files[self._currentFileIx].close()
+        self._mustClose[self._currentFileIx] = False
       self._currentFileIx += 1
 
   def readall(self):
@@ -982,7 +984,9 @@ class CatReader:
       data = self._files[self._currentFileIx].read()
       self._off += len(data)
       returndata += data
-      if self._mustClose[self._currentFileIx]: self._files[self._currentFileIx].close()
+      if self._mustClose[self._currentFileIx]:
+        self._files[self._currentFileIx].close()
+        self._mustClose[self._currentFileIx] = False
       self._currentFileIx += 1
     eof = True
     return returndata
