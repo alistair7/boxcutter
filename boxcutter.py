@@ -70,6 +70,8 @@ def doList(filenames):
         continue
       usedStdin = True
 
+    zeroLengthLastBox = False
+
     with openFileOrStdin(filename, 'rb') as f:
       firstBytes = f.read(2)
       if firstBytes == b'\xff\x0a':
@@ -124,7 +126,6 @@ def doList(filenames):
               else:
                 details[i] = invalid
 
-          zeroLengthLastBox = False
           if boxList[-1].length == 0:
             zeroLengthLastBox = True
             boxList[-1].length = reader.finalBoxSize()
@@ -658,8 +659,8 @@ class BoxReader:
     if availableHeaderBytes > 0:
       want = min(availableHeaderBytes, n) if n >= 0 else availableHeaderBytes
       end = self._clientBoxDataOffset + want
-      to.write(self._currentBoxHeader[self._clientBoxDataOffset:end])
-      self._off += want
+      if to.write(self._currentBoxHeader[self._clientBoxDataOffset:end]) != want:
+        raise IOError(f'copyCurrentBox: failed to copy {want} bytes of box header data.\n')
       self._clientBoxDataOffset += want
       totalCopied = want
       if totalCopied == n:
