@@ -9,6 +9,7 @@ import io
 import math
 import os
 import shlex
+import stat
 import struct
 import sys
 import uuid
@@ -367,9 +368,15 @@ def openFileOrStdout(name, *args, **kwargs):
 
 def streamSize(f):
   """
-  Return the full size in bytes of the open file, @p f, using seek/tell.
+  Return the full size in bytes of the open file, @p f, using fstat or seek/tell.
   If the file isn't seekable, return -1.
   """
+  try:
+    statInfo = os.fstat(f.fileno())
+    if stat.S_ISREG(statInfo.st_mode):
+      return statInfo.st_size
+  except OSError:
+    pass
   if not f.seekable(): return -1
   # Unlike C's ftell(), Python's tell() is safe to use as a byte offset for binary files.
   pos = f.tell()
