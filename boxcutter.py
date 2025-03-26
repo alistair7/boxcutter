@@ -377,7 +377,7 @@ def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
 
     appendingBoxes = len(newboxes) > 0
     originalBytesCopied = 0
-    i = 0
+    i = -1
 
     for i,box in enumerate(reader):
       if i == at:
@@ -394,7 +394,6 @@ def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
         fullInputSize = streamSize(infile)
         if fullInputSize != -1:
           payloadSize = fullInputSize - originalBytesCopied - (16 if box.hasExtendedSize else 8)
-          sys.stderr.write(f'Calculated last box payload size is {fullInputSize} - {originalBytesCopied} - {16 if box.hasExtendedSize else 8} = {payloadSize}.\n')
           originalBytesCopied += writeBoxHeader(outfile, box.boxtype, payloadSize)
           payloadWrote = reader.copyCurrentBoxPayload(outfile)
           originalBytesCopied += payloadWrote

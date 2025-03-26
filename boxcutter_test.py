@@ -7,6 +7,7 @@
 
 import io
 import struct
+import sys
 import unittest
 import boxcutter
 
@@ -108,6 +109,33 @@ class TestCount(unittest.TestCase):
       self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.FAILED_PARSE)
 
 
+class TestExtractCodestream(unittest.TestCase):
+
+  def setUp(self):
+    with open(f'{TESTFILES}/pixel-raw.jxl', 'rb') as raw:
+      self.jxlcodestream = raw.read()
+
+  def testJxlc(self):
+    with open(f'{TESTFILES}/pixel-jxlc.jxl', 'rb') as jxl, \
+         io.BytesIO() as result:
+      self.assertEqual(boxcutter.extractJxlCodestream(jxl, result), 0)
+      self.assertEqual(result.getvalue(), self.jxlcodestream)
+
+  def testJxlp(self):
+    for suffix in ('8','single','stupid'):
+      fname = f'{TESTFILES}/pixel-jxlp-{suffix}.jxl'
+      with open(fname, 'rb') as jxl, \
+           io.BytesIO() as result:
+        self.assertEqual(boxcutter.extractJxlCodestream(jxl, result), 0)
+        self.assertEqual(result.getvalue(), self.jxlcodestream,
+                         msg=f'Failed to get correct codestream from {fname}')
+
+  def testJxlpWrongSequence(self):
+    with open(f'{TESTFILES}/pixel-jxlp-badsequence.jxl', 'rb') as jxl, \
+         io.BytesIO() as result:
+      self.assertNotEqual(boxcutter.extractJxlCodestream(jxl, result), 0)
+
+
 class TestWrapCodestream(unittest.TestCase):
 
   def setUp(self):
@@ -163,6 +191,124 @@ class TestWrapCodestream(unittest.TestCase):
       src.seek(0)
       self.assertEqual(boxcutter.addContainer(src, dst, splits=[0,8,9,11,9]), 0)
       self.assertEqual(dst.getvalue(), expect)
+
+
+class TestAdd(unittest.TestCase):
+
+  def testAddToEmpty(self):
+    with io.BytesIO() as empty, \
+         io.BytesIO() as result:
+      self.assertEqual(boxcutter.doAddBoxes(empty, result, [], 'utf-8'), 0)
+      self.assertEqual(result.getvalue(), b'')
+
+    for position in (-1, 0):
+      with io.BytesIO() as empty, \
+           io.BytesIO() as result:
+          self.assertEqual(boxcutter.doAddBoxes(empty, result,
+                                                ['utf8=café','empt=',f'ABOX@{TESTFILES}/a'],
+                                                'utf-8', at=position), 0,
+                           msg=f'Position {position}')
+          self.assertEqual(result.getvalue(), b'\0\0\0\x0dutf8caf\xc3\xa9\0\0\0\x08empt' \
+                                              b'\0\0\0\x0aABOXa\n',
+                           msg=f'Position {position}')
+
+    # Can't add at position > 0
+    with io.BytesIO() as empty, \
+         io.BytesIO() as result:
+      self.assertNotEqual(boxcutter.doAddBoxes(empty, result, ['utf8=café'], 'utf-8',
+                                               at=1), 0)
+
+  def testAppend(self):
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as f:
+      original = f.read()
+    # Replace size 0 with size 34
+    originalWithExplicitSize = original[:-31] + b'\x22' + original[-30:]
+
+    # Adding anything (or nothing) to a file with an implicitly-sized final box
+    # will try to make the size explicit, even if it doesn't strictly need to.
+    with io.BytesIO(original) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      self.assertEqual(boxcutter.doAddBoxes(src, dst, [], 'utf-8'), 0)
+      self.assertEqual(originalWithExplicitSize, dst.getvalue())
+
+    # If input is unseekable/unstat-able, size can be set by seeking back the output
+    with boxcutter.CatReader(False, original) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      self.assertEqual(boxcutter.doAddBoxes(src, dst, [], 'utf-8'), 0)
+      self.assertEqual(originalWithExplicitSize, dst.getvalue())
+    # If output is unseekable/unstat-able, size can be set by checking the size of the input
+    with io.BytesIO(original) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      dst.seekable = lambda : False
+      self.assertEqual(boxcutter.doAddBoxes(src, dst, [], 'utf-8'), 0)
+      self.assertEqual(originalWithExplicitSize, dst.getvalue())
+    # If neither input nor output are seekable/stat-able, setting the size isn't possible.
+    # But if we're not appending anything, this is OK.
+    with boxcutter.CatReader(False, original) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      dst.seekable = lambda : False
+      self.assertEqual(boxcutter.doAddBoxes(src, dst, [], 'utf-8'), 0)
+      self.assertEqual(original, dst.getvalue())
+    with boxcutter.CatReader(False, original) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      dst.seekable = lambda : False
+      self.assertNotEqual(boxcutter.doAddBoxes(src, dst, ['fail='], 'utf-8'), 0)
+
+    for position in (-1, 4):
+      with io.BytesIO(original) as src, \
+           io.BytesIO() as dst:
+        src.seek(0)
+        self.assertEqual(boxcutter.doAddBoxes(src, dst, ['empt=',f'ABOX@{TESTFILES}/a'],
+                                              'utf-8', at=position), 0,
+                         msg=f'Position {position}')
+        self.assertEqual(originalWithExplicitSize + b'\0\0\0\x08empt\0\0\0\x0aABOXa\n',
+                         dst.getvalue(),
+                         msg=f'Position {position}')
+
+    # Force doAddBoxes to use implicit size for the last box
+    with io.BytesIO(original) as src, \
+         io.BytesIO(b'payload') as payload, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      dst.seekable = lambda : False
+      payload.seek(0)
+      payload.seekable = lambda : False
+      #payload.fileno = OSError
+
+      class FakeStdin:
+        buffer = payload
+      saveStdin = sys.stdin
+      sys.stdin = FakeStdin
+      self.assertEqual(boxcutter.doAddBoxes(src, dst, ['empt=',f'STDI@-'], 'utf-8'), 0)
+      sys.stdin = saveStdin
+
+      self.assertEqual(originalWithExplicitSize + b'\0\0\0\x08empt\0\0\0\0STDIpayload',
+                       dst.getvalue())
+
+  def testInsert(self):
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as f:
+      original = f.read()
+    # Replace size 0 with size 34
+    originalWithExplicitSize = original[:-31] + b'\x22' + original[-30:]
+
+    insertBox = b'\0\0\0\x0ainsert'
+
+    # Try inserting before each of the 4 boxes in various-boxes.4cc, plus adding to the end.
+    for position,offset in enumerate([0, 8, 19, 40, 74]):
+      with io.BytesIO(original) as src, \
+           io.BytesIO() as dst:
+        src.seek(0)
+        self.assertEqual(
+          boxcutter.doAddBoxes(src, dst, ['inse=rt'], 'utf-8', at=position), 0,
+          msg=f'Position {position}')
+        self.assertEqual(dst.getvalue(),
+                         originalWithExplicitSize[:offset] + insertBox + originalWithExplicitSize[offset:],
+                         msg=f'Position {position}')
 
 
 if __name__ == '__main__':
