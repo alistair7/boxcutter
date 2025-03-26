@@ -6,8 +6,12 @@
 # license that can be found in the LICENSE file.
 
 import io
+import struct
 import unittest
 import boxcutter
+
+from os.path import dirname, realpath
+TESTFILES = f'{dirname(realpath(__file__))}/testfiles'
 
 class TestCatReader(unittest.TestCase):
 
@@ -74,6 +78,62 @@ class TestCatReader(unittest.TestCase):
         self.assertEqual(reader.read(100), b'hree')
         self.assertEqual(reader.tell(), 11)
 
+
+class TestWrapCodestream(unittest.TestCase):
+
+  def setUp(self):
+    with open(f'{TESTFILES}/pixel-raw.jxl', 'rb') as raw:
+      self.jxlcodestream = raw.read()
+
+  def testJxlc(self):
+    with open(f'{TESTFILES}/pixel-jxlc.jxl', 'rb') as f:
+      expect = f.read()
+
+    with io.BytesIO(self.jxlcodestream) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      self.assertEqual(boxcutter.addContainer(src, dst), 0)
+      self.assertEqual(dst.getvalue(), expect)
+
+    expect = boxcutter.JXL_CONTAINER_SIG + \
+             b'\0\0\0\x14ftypjxl \0\0\0\0jxl ' + \
+             b'\0\0\0\x09jxll\x0a' + \
+             struct.pack('>I', 8 + len(self.jxlcodestream)) + b'jxlc' + \
+             self.jxlcodestream
+
+    with io.BytesIO(self.jxlcodestream) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      self.assertEqual(boxcutter.addContainer(src, dst, jxll=10), 0)
+      self.assertEqual(dst.getvalue(), expect)
+
+  def testJxlpSensible(self):
+    with open(f'{TESTFILES}/pixel-jxlp-8.jxl', 'rb') as f:
+      expect = f.read()
+    with io.BytesIO(self.jxlcodestream) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      self.assertEqual(boxcutter.addContainer(src, dst, splits=[8]), 0)
+      self.assertEqual(dst.getvalue(), expect)
+
+  def testJxlpStupid(self):
+    with open(f'{TESTFILES}/pixel-jxlp-single.jxl', 'rb') as f:
+      expect = f.read()
+
+    with io.BytesIO(self.jxlcodestream) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      self.assertEqual(boxcutter.addContainer(src, dst, splits=[]), 0)
+      self.assertEqual(dst.getvalue(), expect)
+
+    with open(f'{TESTFILES}/pixel-jxlp-stupid.jxl', 'rb') as f:
+      expect = f.read()
+
+    with io.BytesIO(self.jxlcodestream) as src, \
+         io.BytesIO() as dst:
+      src.seek(0)
+      self.assertEqual(boxcutter.addContainer(src, dst, splits=[0,8,9,11,9]), 0)
+      self.assertEqual(dst.getvalue(), expect)
 
 if __name__ == '__main__':
     unittest.main()

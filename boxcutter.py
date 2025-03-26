@@ -289,14 +289,7 @@ def addContainer(src, dst, jxll=None, splits=None):
   @param[in] splits If not None, this must be an iterable of ints giving byte offsets at
                     which the JXL codestream should be split.  If this is provided, the
                     output will use `len(splits)+1` `jxlp` boxes instead of a single
-                    `jxlc` box.  This is basically useless in this context - the adjacent
-                    `jxlp` boxes serve only to waste about `4 + 12*len(splits)` bytes,
-                    but you can later insert, e.g., an `Exif` box in between.
-                    (A smart encoder like libjxl will output a small `jxlp` with
-                    enough bytes to get the image's Basic Info, followed by any metadata
-                    boxes, followed by another `jxlp` box containing the rest of the
-                    codestream.  We have no way of identifying a suitable split point, so
-                    this is entirely up to the caller.)
+                    `jxlc` box.
   """
   codestreamBytesRemain = streamSize(src)
   jxlSig = src.read(2) # Effectively peeking, so don't decrement codestreamBytesRemain
@@ -311,11 +304,12 @@ def addContainer(src, dst, jxll=None, splits=None):
   if jxll is not None:
     dst.write(b'\0\0\0\x09jxll' + bytes([jxll]))
 
-  if splits is not None:
-    sortedSplits = list(sorted(splits))
-    lastOff = 0
-    seqNum = -1
-    with CatReader(False, jxlSig, src) as src:
+  with CatReader(False, jxlSig, src) as src:
+
+    if splits is not None:
+      sortedSplits = list(sorted(splits))
+      lastOff = 0
+      seqNum = -1
       for i,off in enumerate(sortedSplits):
         seqNum = i
         chunkSize = off - lastOff
@@ -340,9 +334,9 @@ def addContainer(src, dst, jxll=None, splits=None):
       lastBoxSize = writeBoxHeader(dst, b'jxlp', payloadSize) + \
                     dst.write(struct.pack('>I', seqNum)) + \
                     copyData(src, dst, None)
-  else:
-    lastBoxSize = writeBoxHeader(dst, b'jxlc', codestreamBytesRemain) + \
-                  copyData(src, dst, None)
+    else:
+      lastBoxSize = writeBoxHeader(dst, b'jxlc', codestreamBytesRemain) + \
+                    copyData(src, dst, None)
 
   # If the input wasn't seekable but the output is, we may now be able to set the last
   # box's size field.
