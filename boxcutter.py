@@ -28,7 +28,7 @@ def main(argv):
   listParser.add_argument('files', nargs='*')
 
   countParser = subparsers.add_parser('count', help='Count boxes.')
-  countParser.add_argument('-t', '--type', help='Count only boxes of this specific type.')
+  countParser.add_argument('-t', '--type', dest='boxtype', help='Count only boxes of this specific type.')
   countParser.add_argument('files', nargs='*')
 
   extractJxlParser = subparsers.add_parser('extract-jxl-codestream', help='Extract the raw JPEG XL codestream from a JXL container file.')
@@ -55,7 +55,7 @@ def main(argv):
   if args.mode == 'list':
     return doList(args.files)
   elif args.mode == 'count':
-    return doCount(args.files, args.type)
+    return doCount(args.files, args.boxtype)
   elif args.mode in ('extract-jxl-codestream', 'wrap-jxl-codestream', 'add'):
     if len(args.filenames) == 0:
       args.filenames = ['-', '-']
@@ -191,7 +191,7 @@ def doList(filenames):
   return 0
 
 
-def doCount(filenames, type=None):
+def doCount(filenames, boxtype=None, out=sys.stdout):
   multipleFiles = len(filenames) > 1
   usedStdin = False
   for i,filename in enumerate(filenames):
@@ -203,27 +203,45 @@ def doCount(filenames, type=None):
       usedStdin = True
 
     with openFileOrStdin(filename, 'rb') as f:
-      firstBytes = f.read(2)
-      if firstBytes == b'\xff\x0a':
-        sys.stderr.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
-        continue
-
-      count = 0
-      try:
-        with CatReader(False, firstBytes, f) as source, BoxReader(source) as reader:
-          for box in reader:
-            if type is None or box.boxtype.decode('ascii', errors='replace') == type:
-              count += 1
-      except Exception as ex:
-        sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format; {ex}.\n')
+      count = getBoxCount(f, boxtype=boxtype)
+      if count < 0:
+        if count == RAW_JXL:
+          sys.stderr.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
+        else:
+          sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format.\n')
         continue
 
     if multipleFiles:
-      sys.stdout.write(f'{shlex.quote(filename)}: ')
-    sys.stdout.write(str(count))
-    sys.stdout.write('\n')
+      out.write(f'{shlex.quote(filename)}: ')
+    out.write(str(count))
+    out.write('\n')
 
   return 0
+
+RAW_JXL = -1
+FAILED_PARSE = -2
+
+def getBoxCount(src, boxtype=None):
+  """
+  @param src Readable binary file-like object.
+  @param boxtype Only count this box type.
+
+  @return The number of boxes in the file if successful.
+  @return RAW_JXL if the input looks like a raw JXL codestream (not a container).
+  @return FAILED_PARSE otherwise.
+  """
+  firstBytes = src.read(2)
+  if firstBytes == b'\xff\x0a':
+    return RAW_JXL
+  count = 0
+  try:
+    with CatReader(False, firstBytes, src) as source, BoxReader(source) as reader:
+      for box in reader:
+        if boxtype is None or box.boxtype.decode('ascii', errors='replace') == boxtype:
+          count += 1
+  except Exception:
+    return FAILED_PARSE
+  return count
 
 def extractJxlCodestream(src, dst):
 

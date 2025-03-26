@@ -79,6 +79,35 @@ class TestCatReader(unittest.TestCase):
         self.assertEqual(reader.tell(), 11)
 
 
+class TestCount(unittest.TestCase):
+
+  def testCountEmpty(self):
+    self.assertEqual(boxcutter.getBoxCount(io.BytesIO()), 0)
+    self.assertEqual(boxcutter.getBoxCount(io.BytesIO(), boxtype='JXL '), 0)
+
+  def testCountRawJxl(self):
+    with open(f'{TESTFILES}/pixel-raw.jxl', 'rb') as jxl:
+      jxl.seek(0)
+      self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.RAW_JXL)
+      jxl.seek(0)
+      self.assertEqual(boxcutter.getBoxCount(jxl, boxtype='JXL '), boxcutter.RAW_JXL)
+
+  def testCountSimple(self):
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as jxl:
+      jxl.seek(0)
+      self.assertEqual(boxcutter.getBoxCount(jxl), 4)
+      jxl.seek(0)
+      self.assertEqual(boxcutter.getBoxCount(jxl, 'BBBB'), 1)
+
+  def testCountInvalid(self):
+    with io.BytesIO(b'\0') as jxl:
+      jxl.seek(0)
+      self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.FAILED_PARSE)
+    with io.BytesIO(b'\0\0\0\x09ABCD\0\0\0\x09EFGHx') as jxl:
+      jxl.seek(0)
+      self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.FAILED_PARSE)
+
+
 class TestWrapCodestream(unittest.TestCase):
 
   def setUp(self):
@@ -134,6 +163,7 @@ class TestWrapCodestream(unittest.TestCase):
       src.seek(0)
       self.assertEqual(boxcutter.addContainer(src, dst, splits=[0,8,9,11,9]), 0)
       self.assertEqual(dst.getvalue(), expect)
+
 
 if __name__ == '__main__':
     unittest.main()
