@@ -24,6 +24,12 @@ def main(argv):
   parser = argparse.ArgumentParser()
   subparsers = parser.add_subparsers(dest='mode', metavar='MODE')
 
+  inOutParser = argparse.ArgumentParser(add_help=False)
+  inOutParser.add_argument('infile', nargs='?', default='-',
+                           help='Input file.  May be `-` to read from stdin.  Default is `-`.')
+  inOutParser.add_argument('outfile', nargs='?', default='-',
+                           help='Output file.  May be `-` to write to stdout.  Default is `-`.')
+
   listParser = subparsers.add_parser('list', help='List all boxes in the named files.')
   listParser.add_argument('files', nargs='*')
 
@@ -31,15 +37,16 @@ def main(argv):
   countParser.add_argument('-t', '--type', dest='boxtype', help='Count only boxes of this specific type.')
   countParser.add_argument('files', nargs='*')
 
-  extractJxlParser = subparsers.add_parser('extract-jxl-codestream', help='Extract the raw JPEG XL codestream from a JXL container file.')
-  extractJxlParser.add_argument('filenames', nargs='*', help='One input file and one output file; omit both to use stdin and stdout, respectively.')
+  extractJxlParser = subparsers.add_parser('extract-jxl-codestream', parents=[inOutParser],
+                                           help='Extract the raw JPEG XL codestream from a JXL container file.')
 
-  wrapJxlParser = subparsers.add_parser('wrap-jxl-codestream', help='Wrap a raw JPEG XL codestream in a simple ISO/IEC 18181-2 "BMFF-like" container.')
+  wrapJxlParser = subparsers.add_parser('wrap-jxl-codestream', parents=[inOutParser],
+                                        help='Wrap a raw JPEG XL codestream in a simple ISO/IEC 18181-2 "BMFF-like" container.')
   wrapJxlParser.add_argument('--level', '-l', type=int, metavar='N', help='Add a codestream level declaration to the file, for level N (adds a `jxll` box to the output).')
   wrapJxlParser.add_argument('--splits', '-s', metavar='OFFSET,OFFSET,...', help='Write several `jxlp` boxes instead of a single `jxlc` box, splitting the codestream at these byte offsets.')
-  wrapJxlParser.add_argument('filenames', nargs='*', help='One input file and one output file; omit both to use stdin and stdout, respectively.')
 
-  addParser = subparsers.add_parser('add', help='Add one or more metadata boxes to the file.')
+  addParser = subparsers.add_parser('add', parents=[inOutParser],
+                                    help='Add one or more metadata boxes to the file.')
   addParser.add_argument('--at', default=-1, type=int, help='Position to insert the boxes.  Valid indexes range from 0 to the current box count.  Default is -1, which appends the new boxes.')
   addParser.add_argument('--box', action='append',
                          help='Box specifier in the format "TYPE=DATA" ' \
@@ -48,7 +55,6 @@ def main(argv):
                               'FILE.  FILE may be \'-\' to read box content from stdin.' \
                               '  Boxes are added in the order they are passed.')
   addParser.add_argument('--encoding', default='UTF-8', help='When setting box content from the command line (TYPE=...), encode the text value using this character encoding.  Default is UTF-8.')
-  addParser.add_argument('filenames', nargs='*', help='One input file and one output file; omit both to use stdin and stdout, respectively.')
 
   args = parser.parse_args(argv[1:])
 
@@ -57,12 +63,8 @@ def main(argv):
   elif args.mode == 'count':
     return doCount(args.files, args.boxtype)
   elif args.mode in ('extract-jxl-codestream', 'wrap-jxl-codestream', 'add'):
-    if len(args.filenames) == 0:
-      args.filenames = ['-', '-']
-    elif len(args.filenames) != 2:
-      sys.stderr.write(f'Error: {args.mode} requires one input and one output file.\n')
-    with openFileOrStdin(args.filenames[0], 'rb') as infile, \
-         openFileOrStdout(args.filenames[1], 'wb') as outfile:
+    with openFileOrStdin(args.infile, 'rb') as infile, \
+         openFileOrStdout(args.outfile, 'wb') as outfile:
       if args.mode == 'extract-jxl-codestream':
         return extractJxlCodestream(infile, outfile)
       if args.mode == 'wrap-jxl-codestream':
