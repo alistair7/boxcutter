@@ -89,8 +89,8 @@ def doList(filenames):
     zeroLengthLastBox = False
 
     with openFileOrStdin(filename, 'rb') as f:
-      firstBytes = f.read(2)
-      if firstBytes == b'\xff\x0a':
+      firstBytes = f.read(8)
+      if firstBytes[:2] == b'\xff\x0a' and not isValid4cc(firstBytes[4:8]):
         sys.stdout.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
         if fi < len(filenames) - 1: sys.stdout.write('\n')
         continue
@@ -384,7 +384,8 @@ def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
     for i,box in enumerate(reader):
       if i == at:
         # Insert the boxes here
-        _writeBoxes(outfile, newboxes, encoding, atEnd=False)
+        if _writeBoxes(outfile, newboxes, encoding, atEnd=False) == -1:
+          return 1
         appendingBoxes = False
 
       # Copy the existing box.
@@ -438,8 +439,8 @@ def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
       sys.stderr.write(f"Error: can't insert boxes at position {at}; box count is {i+1}.\n")
       return 1
 
-    if appendingBoxes:
-      _writeBoxes(outfile, newboxes, encoding, atEnd=True)
+    if appendingBoxes and _writeBoxes(outfile, newboxes, encoding, atEnd=True) == -1:
+      return 1
   return 0
 
 def _writeBoxes(outfile, boxes, encoding, atEnd):
@@ -455,16 +456,17 @@ def _writeBoxes(outfile, boxes, encoding, atEnd):
   """
   wrote = 0
   for boxi,newBox in enumerate(boxes):
-    newType = newBox[:4]
+    newTypeStr = newBox[:4]
+    newTypeBytes = newTypeStr.encode('ASCII', errors='ignore')
     newMethod = newBox[4:5]
     newDataSource = newBox[5:]
-    if len(newType) != 4 or newMethod not in ('=','@'):
+    if len(newTypeStr) != 4 or not isValid4cc(newTypeBytes) or newMethod not in ('=','@'):
       sys.stderr.write(f'Invalid box specifier: {shlex.quote(newBox)}.\n')
       return -1
 
     if newMethod == '=':
       data = newDataSource.encode(encoding)
-      wrote += writeBoxHeader(outfile, newType.encode('ASCII'), len(data)) + \
+      wrote += writeBoxHeader(outfile, newTypeBytes, len(data)) + \
                outfile.write(data)
       continue
 
@@ -480,7 +482,7 @@ def _writeBoxes(outfile, boxes, encoding, atEnd):
           # Bookmark the size field so we can come back and update it later
           outBoxOffset = outfile.tell()
 
-      wrote += writeBoxHeader(outfile, newType.encode('ASCII'), dataSize) + \
+      wrote += writeBoxHeader(outfile, newTypeBytes, dataSize) + \
                copyData(inbox, outfile, dataSize)
 
       if dataSize == -1 and outfile.seekable():
@@ -515,6 +517,9 @@ def writeBoxHeader(to, boxtype, payloadSize):
   return to.write(b'\0\0\0\x01') + \
          to.write(boxtype) + \
          to.write(struct.pack('>Q', boxSize))
+
+def isValid4cc(bytes4):
+  return len(bytes4) == 4 and all(map(lambda b : (b >= 0x20 and b <= 0x7e), bytes4))
 
 def openFileOrStdin(name, *args, **kwargs):
   return (sys.stdin.buffer if name == '-' else open(name, *args, **kwargs))
@@ -716,6 +721,8 @@ class BoxReader:
     if newBox.length == 0:
       self._eof = True
     newBox.boxtype = self._currentBoxHeader[4:8]
+    if not isValid4cc(newBox.boxtype):
+      raise InvalidBmffError(f'Invalid box type: {newBox.boxtype}')
     if newBox.length > 0 and newBox.length < len(self._currentBoxHeader):
       raise InvalidBmffError(f'`{newBox.boxtype}` box with declared length of ' \
                             f'{newBox.length} has {len(self._currentBoxHeader)} bytes ' \

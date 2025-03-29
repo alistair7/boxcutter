@@ -310,6 +310,19 @@ class TestAdd(unittest.TestCase):
                          originalWithExplicitSize[:offset] + insertBox + originalWithExplicitSize[offset:],
                          msg=f'Position {position}')
 
+  def testAddNonAscii(self):
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src, \
+         io.BytesIO() as dst:
+      self.assertNotEqual(boxcutter.doAddBoxes(src, dst, ['ab\tc='], 'utf-8'), 0)
+
+class TestIsValid4cc(unittest.TestCase):
+  def testIsValid4cc(self):
+    tests = ((b'abcd', True),
+             (b' a0~', True),
+             (b'a0~', False),
+             (b'abc\x1F', False))
+    for b, expect in tests:
+      self.assertEqual(boxcutter.isValid4cc(b), expect, msg=f'Unexpected result for {b}')
 
 if __name__ == '__main__':
     unittest.main()
