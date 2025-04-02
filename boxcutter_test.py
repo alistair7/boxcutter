@@ -315,6 +315,130 @@ class TestAdd(unittest.TestCase):
          io.BytesIO() as dst:
       self.assertNotEqual(boxcutter.doAddBoxes(src, dst, ['ab\tc='], 'utf-8'), 0)
 
+class TestFilter(unittest.TestCase):
+
+  def testPassthrough(self):
+    # Drop nothing
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src, \
+         io.BytesIO() as dst:
+      original = src.read()
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst, False, []), 0)
+      self.assertEqual(dst.getvalue(), original)
+
+    # Keep nothing
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src, \
+         io.BytesIO() as dst:
+      self.assertEqual(boxcutter.doFilter(src, dst, True, []), 0)
+      self.assertEqual(dst.getvalue(), b'')
+
+  def testRemoveIndexes(self):
+    for keep, boxstats in ( (False, ('i=0','i=3','i=1000')),
+                            (True, ('i=1..2',)) ):
+      with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src, \
+           io.BytesIO() as dst:
+        self.assertEqual(boxcutter.doFilter(src, dst, keep, boxstats), 0)
+        self.assertEqual(dst.getvalue(), b'\0\0\0\x0bBBBBbbb' \
+                                         b'\0\0\0\x01CCCC\0\0\0\0\0\0\0\x15ccccc')
+
+    for keep, boxstat in ((False, 'i=1..'),
+                           (True, 'i=..0')):
+      with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src, \
+           io.BytesIO() as dst:
+        self.assertEqual(boxcutter.doFilter(src, dst, keep, [boxstat]), 0)
+        self.assertEqual(dst.getvalue(), b'\0\0\0\x08AAAA')
+
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src, \
+         io.BytesIO() as dst:
+      original = src.read()
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst, True, ['i=..']), 0)
+      self.assertEqual(dst.getvalue(), original)
+
+  def testRemoveTypes(self):
+    originalWithNoJxlps = boxcutter.JXL_CONTAINER_SIG + b'\0\0\0\x14ftypjxl \0\0\0\0jxl '
+    with open(f'{TESTFILES}/pixel-jxlp-8.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      self.assertEqual(boxcutter.doFilter(src, dst, False, ['type=jxlp']), 0)
+      self.assertEqual(dst.getvalue(), originalWithNoJxlps)
+    with open(f'{TESTFILES}/pixel-jxlp-8.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      original = src.read()
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst, False, ['type=JXLP']), 0)
+      self.assertEqual(dst.getvalue(), original)
+    with open(f'{TESTFILES}/pixel-jxlp-8.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      original = src.read()
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst, False, ['itype=JXLP']), 0)
+      self.assertEqual(dst.getvalue(), originalWithNoJxlps)
+
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst1, io.BytesIO() as dst2, io.BytesIO() as dst3:
+      original = src.read()
+      src.seek(0)
+      # This should be equivalent to removing both brob boxes
+      self.assertEqual(boxcutter.doFilter(src, dst1, False, ['type=Exif','itype=XML ']), 0)
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst2, False, ['TYPE=brob']), 0)
+      self.assertEqual(dst1.getvalue(), dst2.getvalue())
+
+      # ...but this should have no effect
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst3, False, ['TYPE=Exif','ITYPE=XML ']), 0)
+      self.assertEqual(dst3.getvalue(), original)
+
+  def testWildcards(self):
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst1, io.BytesIO() as dst2, io.BytesIO() as dst3:
+      self.assertEqual(boxcutter.doFilter(src, dst1, False, ['type~=*']), 0)
+      self.assertEqual(dst1.getvalue(), b'')
+
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst2, False, ['type~=????']), 0)
+      self.assertEqual(dst2.getvalue(), b'')
+
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst3, False,
+                            ['TYPE=brob','itype~=[j ]xl*', 'type=jbrd', 'type~=*?**ra']), 0)
+      self.assertEqual(dst3.getvalue(), b'\0\0\0\x14ftypjxl \0\0\0\0jxl ')
+
+    awkwardBox = b'\0\0\0\0*?[]awkward'
+    with io.BytesIO(awkwardBox) as src, \
+         io.BytesIO() as dst, io.BytesIO() as dst2:
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst, True, ['type=*?[]']), 0)
+      self.assertEqual(dst.getvalue(), awkwardBox)
+
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst2, True, ['type~=[*][?][[]]']), 0)
+      self.assertEqual(dst2.getvalue(), awkwardBox)
+
+  def testJxlTypes(self):
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst1, io.BytesIO() as dst2:
+      self.assertEqual(boxcutter.doFilter(src, dst1, True, ['@jxl']), 0)
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst2, False,
+                                          ['type=jbrd','type=Exif','type=xml ','type=xtra']), 0)
+      self.assertEqual(dst1.getvalue(), dst2.getvalue())
+
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst1, io.BytesIO() as dst2:
+      self.assertEqual(boxcutter.doFilter(src, dst1, True, ['@JXL']), 0)
+      src.seek(0)
+      self.assertEqual(boxcutter.doFilter(src, dst2, False, ['type=xtra']), 0)
+      self.assertEqual(dst1.getvalue(), dst2.getvalue())
+
+
+  def testRemoveMulti(self):
+    with open(f'{TESTFILES}/pixel-jxlp-8.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      self.assertEqual(boxcutter.doFilter(src, dst, False, ['type=jxlp','i=0..0']), 0)
+      self.assertEqual(dst.getvalue(), b'\0\0\0\x14ftypjxl \0\0\0\0jxl ')
+
+
 class TestIsValid4cc(unittest.TestCase):
   def testIsValid4cc(self):
     tests = ((b'abcd', True),

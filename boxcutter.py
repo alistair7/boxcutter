@@ -5,6 +5,8 @@
 # Use of this source code is governed by an MIT-style
 # license that can be found in the LICENSE file.
 
+import collections
+import fnmatch
 import io
 import math
 import os
@@ -56,13 +58,19 @@ def main(argv):
                               '  Boxes are added in the order they are passed.')
   addParser.add_argument('--encoding', default='UTF-8', help='When setting box content from the command line (TYPE=...), encode the text value using this character encoding.  Default is UTF-8.')
 
+  filterParser = subparsers.add_parser('filter', parents=[inOutParser],
+                                       help='Remove or modify boxes.')
+  dropOrKeep = filterParser.add_mutually_exclusive_group()
+  dropOrKeep.add_argument('--drop', metavar='BOXSPEC', action='append', help='Remove the specified box(es).')
+  dropOrKeep.add_argument('--keep', metavar='BOXSPEC', action='append', help='Keep only the specified box(es).')
+
   args = parser.parse_args(argv[1:])
 
   if args.mode == 'list':
     return doList(args.files)
   elif args.mode == 'count':
     return doCount(args.files, args.boxtype)
-  elif args.mode in ('extract-jxl-codestream', 'wrap-jxl-codestream', 'add'):
+  elif args.mode in ('extract-jxl-codestream', 'wrap-jxl-codestream', 'add', 'filter'):
     with openFileOrStdin(args.infile, 'rb') as infile, \
          openFileOrStdout(args.outfile, 'wb') as outfile:
       if args.mode == 'extract-jxl-codestream':
@@ -70,7 +78,9 @@ def main(argv):
       if args.mode == 'wrap-jxl-codestream':
         splits = map(int, args.splits.split(',')) if args.splits else [] if args.splits is not None else None
         return addContainer(infile, outfile, jxll = args.level, splits=splits)
-      return doAddBoxes(infile, outfile, args.box, args.encoding, args.at)
+      if args.mode == 'add':
+        return doAddBoxes(infile, outfile, args.box, args.encoding, args.at)
+      return doFilter(infile, outfile, args.keep is not None, args.keep if args.keep is not None else args.drop)
 
   return 0
 
@@ -443,6 +453,66 @@ def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
       return 1
   return 0
 
+def doFilter(src, dst, keep, boxspecStrings):
+  """
+  Copy src to dst, keeping or discarding specified boxes.
+
+  @param src Readable file-like object for the input.
+  @param dst Writable file-like object for the result.
+  @param keep True if we're whitelisting boxes to keep, False if we're blacklisting
+              boxes to drop.
+  @param boxspecs List of box specifier strings determining which boxes are affected.
+  """
+  boxspecs = []
+  for s in boxspecStrings:
+    if s in ('@jxl', '@JXL'):
+      boxspecs += [BoxSpec('ITYPE~=jxl*'), BoxSpec('TYPE=ftyp')]
+      if s == '@JXL':
+        boxspecs += [BoxSpec('TYPE=jbrd'), BoxSpec('type=Exif'), BoxSpec('type=xml '),
+                     BoxSpec('type=jumb')]
+    else:
+      boxspecs.append(BoxSpec(s))
+  return filterBoxes(src, dst, keep, boxspecs)
+
+def filterBoxes(src, dst, keep, boxspecs):
+  """
+  Copy src to dst, discarding specified boxes.
+
+  @param src Readable file-like object for the input.
+  @param dst Writable file-like object for the result.
+  @param keep True if we're whitelisting boxes to keep, False if we're blacklisting
+              boxes to drop.
+  @param boxspecs List of BoxSpec objects determining which boxes are affected.
+  """
+
+  seen = collections.defaultdict(lambda : 0)
+
+  with BoxReader(src) as reader:
+    for i,box in enumerate(reader):
+      innerType = box.boxtype
+      boxStart = b''
+      if box.boxtype == b'brob':
+        # Read the inner type.  Don't use readCurrentBoxPayload, as we might want to copy
+        # the header later.
+        want = 20 if box.hasExtendedSize else 12
+        boxStart = reader.readCurrentBox(want)
+        innerType = boxStart[-4:]
+        if len(boxStart) != want or not isValid4cc(innerType):
+          raise InvalidBmffError(f"Invalid `brob` box at position {i}.")
+
+      matches = False
+      for boxspec in boxspecs:
+        if boxspec.matches(i, box, innerType, seen[innerType]):
+          matches = True
+          break
+
+      if (matches and keep) or (not matches and not keep):
+        dst.write(boxStart)
+        reader.copyCurrentBox(dst)
+      seen[innerType] += 1
+  return 0
+
+
 def _writeBoxes(outfile, boxes, encoding, atEnd):
   """
   Write boxes at the current position.
@@ -572,7 +642,70 @@ def copyData(src, dst, count = -1):
   return done
 
 
+class BoxSpec:
+  __slots__ = ['boxtype','typeIsWildcard','typeCaseInsensitive','typeIncludesBrobs',
+               'instanceRange','indexRange']
+  def __init__(self, boxspec):
+    self.boxtype = None
+    self.typeIsWildcard = self.typeCaseInsensitive = False
+    self.typeIncludesBrobs = True
+    self.instanceRange = self.indexRange = None
 
+    if len(boxspec) == 0:
+      return
+
+    propertyValue = boxspec.split('=', maxsplit=1)
+    if len(propertyValue) == 2:
+      prop,val = propertyValue
+
+      if prop == 'i':
+        limits = val.split('..', maxsplit=1)
+        try:
+          self.indexRange = [None if len(limits[0]) == 0 else int(limits[0]), None]
+          if len(limits) < 2:
+            self.indexRange[1] = self.indexRange[0]
+          else:
+            self.indexRange[1] = None if len(limits[1]) == 0 else int(limits[1])
+        except ValueError:
+          raise InvalidBoxSpec('Invalid syntax for "i" specifier')
+        return
+
+      propLower = prop.lower()
+      if propLower in ('type','itype','type~','itype~'):
+        if propLower[-1] == '~':
+          self.typeIsWildcard = True
+          prop = prop[:-1]
+        if propLower[0] == 'i':
+          self.typeCaseInsensitive = True
+          prop = prop[1:]
+        if prop == 'TYPE':
+          self.typeIncludesBrobs = False
+        self.boxtype = (val.lower() if self.typeCaseInsensitive else val).encode('ASCII')
+        return
+
+      # TODO: come up with some syntax for "nth instance of this type"
+
+      raise InvalidBoxSpec(f'Unknown box specifier "{boxspec}"')
+
+  def matches(self, i, box, innerType, instance):
+    if self.indexRange is not None and \
+        ((self.indexRange[0] is not None and i < self.indexRange[0]) or \
+         (self.indexRange[1] is not None and i > self.indexRange[1])):
+      return False
+    if self.instanceRange is not None and \
+        (instance < self.instanceRange[0] or instance > self.instanceRange[1]):
+      return False
+    if self.boxtype is not None:
+      effectiveType = box.boxtype if (not self.typeIncludesBrobs or innerType is None) \
+                                  else innerType
+      if self.typeCaseInsensitive:
+        effectiveType = effectiveType.lower()
+      if self.typeIsWildcard:
+        if not fnmatch.fnmatchcase(effectiveType, self.boxtype):
+          return False
+      elif effectiveType != self.boxtype:
+        return False
+    return True
 
 class BoxCutterException(Exception):
   """Abstract base class for all custom exceptions."""
@@ -588,6 +721,10 @@ class InvalidJxlContainerError(BoxCutterException):
 
 class UsageError(BoxCutterException):
   """API usage error."""
+  pass
+
+class InvalidBoxSpec(BoxCutterException):
+  """Invalid specifier passed to filter function."""
   pass
 
 class BoxDetails:

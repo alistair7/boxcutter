@@ -11,9 +11,9 @@ conform to ISO/IEC 14496-12.  e.g., MP4, HEIF (HEIC, AVIF), JPEG2000.
 ### General Features
 - Display information about the boxes (type, offset, length) that compose the file.
 - Append or insert additional boxes with a specified type and content.
-- Remove specified boxes (not yet implemented).
-- Export boxes - as full boxes including headers, or just the payload (not yet
-  implemented).
+- Remove specified boxes.
+- Export boxes - as full boxes including headers (via `filter`), or just the payload (not
+  yet implemented).
 
 The *content* of boxes is treated as opaque data, with some very limited exceptions.
 
@@ -36,7 +36,7 @@ It CANNOT decode the JXL codestream, so it can't read or modify any properties o
 image (pixels, dimensions, depth, channels, frames, color space).
 
 It CANNOT encode or decode the content of Brotli-compressed (`brob`) boxes, beyond
-identifying the type of the compressed box.
+identifying the type of the compressed box.  (But this is planned for later.)
 
 
 ### Modes
@@ -244,6 +244,105 @@ $ boxcutter.py list newfile.bin
 seq off    len type
 -------------------
 [0] 0x000   13 abcd
+```
+
+#### `filter`
+This mode is for removing or modifying existing boxes.  You can either specify which
+boxes to keep (`--keep`), or which boxes to remove (`--drop`).  Either can be used
+multiple times in a command, but they can't be mixed.
+
+Both methods make use of "box specifiers", which match zero or more boxes in the file.
+The set of boxes affected is the union of the sets matched by each specifier.
+
+Boxes can be specified by their properties:
+
+- `i` - The index of the box in the file, starting at 0.
+- `type` - The box type (4CC) (case sensitive).
+- `itype` - The box type (4CC) (not case sensitive).
+
+Other than printing warnings in certain cases, `filter` mode makes no attempt to stop you
+creating invalid JPEG XL files, which is easy to do by removing critical boxes.
+
+##### Specifying boxes by index
+Specific indexes and (inclusive) ranges of indexes are supported.  If either end of a
+range is omitted, the range is unbounded in that direction.
+
+```
+# Remove the first box
+$ boxcutter.py filter --drop i=0 in.jxl > out.jxl
+
+# Remove the first three boxes
+$ boxcutter.py filter --drop i=0..2 in.jxl > out.jxl
+
+# Remove the first three boxes and everything after the fourth box
+$ boxcutter.py filter --drop i=0..2 --drop i=4.. in.jxl > out.jxl
+# (This is just a confusing way to write `--drop i=3`.)
+```
+
+##### Specifying boxes by type
+
+```
+# Remove all Exif boxes
+$ boxcutter.py filter --drop type=Exif in.jxl > out.jxl
+```
+
+By default, `brob` (brotli compressed) boxes are treated as being the type they *contain*
+rather than all being `brob` type.  The command above would remove both plain `Exif` boxes
+and `brob` boxes containing `Exif`.  Hence `type=brob` will never match anything (unless
+you have a `brob` inside a `brob`).  To disable this special treatment of `brob` boxes,
+put `TYPE` in upper case:
+
+```
+# Remove all Exif boxes (but not brob boxes containing Exif)
+$ boxcutter.py filter --drop TYPE=Exif in.jxl > out.jxl
+
+# Remove all brob-compressed boxes, ignoring their content
+$ boxcutter.py filter --drop TYPE=brob in.jxl > out.jxl
+```
+
+To make the match case-insensitive, use `itype` (or `ITYPE` if you don't want to look
+inside `brob`s).
+
+```
+# Remove all exif, Exif, eXif, ..., EXIF.
+$ boxcutter.py filter --drop itype=exif in.jxl > out.jxl
+```
+
+For both `type` and `itype`, wildcard matching is supported.  This is enabled when you
+use `~=` instead of `=`.  Basic globbing patterns are supported: '\*' matches zero or more
+characters, '?' matches exactly 1 character, and a set of characters enclosed in '[]'
+matches any single character from that set.  To include a literal '\*', '?' or '[' in the
+pattern, enclose it in square brackets, as a set of one possible character.
+
+In most shells it will be necessary to quote the argument if these globbing characters
+are used, to avoid the shell itself trying to interpret them.
+
+```
+# Remove all boxes starting with jxl (case insensitive)
+$ boxcutter.py filter --drop 'itype~=jxl*' in.jxl > out.jxl
+```
+
+##### Convenience filters
+The special box specifier, `@jxl`, matches a minimal set of reserved JPEG XL boxes,
+equivalent to specifying `itype~=jxl*` and `type=ftyp`.  This does not include `jbrd`,
+`Exif`, `'xml '`, or `jumb`.
+
+The special box specifier, `@JXL` is equivalent to specifying `@jxl`, `type=jbrd`,
+`type=Exif`, `type='xml '`, and `type=jumb`.  i.e., it's a superset of `@jxl` that
+includes box types that could be needed for JPEG reconstruction.
+
+There is unfortunately no automatic way to "only include `Exif` and `xml ` if required for
+JPEG reconstruction", because the input is streamed, and boxcutter may encounter one of
+these box types before it knows whether a `jbrd` box is present.  A clumsy workaround
+for this is:
+
+```bash
+if [ "$(boxcutter.py count --type=jbrd in.jxl)" -gt 0 ]; then
+  boxspec=@JXL
+else
+  boxspec=@jxl
+fi
+boxcutter.py filter --keep="$boxspec" in.jxl out.jxl
 ```
 
 ### Implicit box size problems
