@@ -9,11 +9,12 @@ While this is mainly intended for processing JPEG XL files, it can also deal wit
 conform to ISO/IEC 14496-12.  e.g., MP4, HEIF (HEIC, AVIF), JPEG2000.
 
 ### General Features
-- Display information about the boxes (type, offset, length) that compose the file.
-- Append or insert additional boxes with a specified type and content.
-- Remove specified boxes.
-- Export boxes - as full boxes including headers (via `filter`), or just the payload (not
-  yet implemented).
+- Display information about the boxes (type, offset, length) that compose the file
+  (`list`).
+- Append or insert additional boxes with a specified type and content (`add`).
+- Remove specified boxes (`filter`).
+- Export boxes - as full boxes including headers (`filter`), or just the payload
+  (`extract`).
 
 The *content* of boxes is treated as opaque data, with some very limited exceptions.
 
@@ -21,15 +22,20 @@ boxcutter's input and output is always streamed, so it can deal with enormous fi
 enormous individual boxes) using very little memory, and it can be used effectively as
 part of a pipeline.
 
+All commands that consume a single input file and produce a single output file accept
+two positional arguments for the input and output file names.  If these are omitted or
+set to '-', standard input and standard output are used.
+
 ### JPEG-XL-specific Features
 A JPEG XL file can be a "raw" codestream, or stored in a container format allowing extra
 information such as metadata to be included.
 
 boxcutter can:
 
-- Extract the raw JXL codestream from a container.
-- Wrap a raw JXL codestream in the container format.
-- Generate certain optional boxes that are meaningful to JPEG XL decoders (`jxll`).
+- Extract the raw JXL codestream from a container (`extract-jxl-codestream`).
+- Wrap a raw JXL codestream in the container format (`wrap-jxl-codestream`).
+- Generate certain optional boxes that are meaningful to JPEG XL decoders (specifically,
+  `jxll`).
 - Identify JXLs that contain JPEG reconstruction data (via `count --type=jbrd`).
 
 It CANNOT decode the JXL codestream, so it can't read or modify any properties of the
@@ -87,6 +93,19 @@ $ boxcutter.py count --type=brob file.jxl
 2
 ```
 
+#### `extract`
+Extracts the payload of a single box.  You must pass at least one box specifier (see Box
+Specifiers below).  The *first box* that matches any of the specifiers is chosen, and its
+payload is written to the output.
+
+```
+$ boxcutter.py extract --select 'type=xml ' < in.jxl > out.xml
+```
+
+Note that `brob` compressed boxes may be matched based on their inner type, and output
+as compressed Brotli blobs.  See `type` vs. `TYPE` in the Box Specifiers section.
+
+If no matching box is found, or no box specifier is given, boxcutter exits with an error.
 
 #### `extract-jxl-codestream`
 Converts a JXL container to a raw JXL codestream.
@@ -248,24 +267,28 @@ seq off    len type
 
 #### `filter`
 This mode is for removing or modifying existing boxes.  You can either specify which
-boxes to keep (`--keep`), or which boxes to remove (`--drop`).  Either can be used
-multiple times in a command, but they can't be mixed.
-
-Both methods make use of "box specifiers", which match zero or more boxes in the file.
-The set of boxes affected is the union of the sets matched by each specifier.
-
-Boxes can be specified by their properties:
-
-- `i` - The index of the box in the file, starting at 0.
-- `type` - The box type (4CC) (case sensitive).
-- `itype` - The box type (4CC) (not case sensitive).
+boxes to keep (`--keep`), or which boxes to remove (`--drop`).  These options both accept
+a box specifier (see Box Specifiers below).  Either can be used multiple times in a
+command, but they can't be mixed.
 
 Other than printing warnings in certain cases, `filter` mode makes no attempt to stop you
 creating invalid JPEG XL files, which is easy to do by removing critical boxes.
 
-##### Specifying boxes by index
-Specific indexes and (inclusive) ranges of indexes are supported.  If either end of a
-range is omitted, the range is unbounded in that direction.
+There are several examples of how `filter` is used in the Box Specifiers section.
+
+### Box Specifiers
+Several commands accept "box specifiers" which are very basic expressions that identify a
+(possibly empty) subset of the boxes in a file.
+
+The syntax doesn't support complex expressions - you can only test one property per box
+specifier.  Generally, you can pass multiple box specifiers, and they are implicitly
+OR-ed together, so the set of boxes that match is the union of the sets matched by each
+specifier.
+
+#### Specifying boxes by index (`i`)
+Specific indexes and (inclusive) ranges of indexes can be selected using the `i` property.
+The first box is index 0.  If either end of a range is omitted, the range is unbounded in
+that direction.
 
 ```
 # Remove the first box
@@ -279,7 +302,8 @@ $ boxcutter.py filter --drop i=0..2 --drop i=4.. in.jxl > out.jxl
 # (This is just a confusing way to write `--drop i=3`.)
 ```
 
-##### Specifying boxes by type
+#### Specifying boxes by type (`type`, `itype`)
+Specific box types can be selected using the `type` property (and its variations):
 
 ```
 # Remove all Exif boxes
@@ -322,7 +346,7 @@ are used, to avoid the shell itself trying to interpret them.
 $ boxcutter.py filter --drop 'itype~=jxl*' in.jxl > out.jxl
 ```
 
-##### Convenience filters
+#### Convenience filters
 The special box specifier, `@jxl`, matches a minimal set of reserved JPEG XL boxes,
 equivalent to specifying `itype~=jxl*` and `type=ftyp`.  This does not include `jbrd`,
 `Exif`, `'xml '`, or `jumb`.

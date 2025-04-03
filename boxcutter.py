@@ -39,6 +39,10 @@ def main(argv):
   countParser.add_argument('-t', '--type', dest='boxtype', help='Count only boxes of this specific type.')
   countParser.add_argument('files', nargs='*')
 
+  extractParser = subparsers.add_parser('extract', parents=[inOutParser],
+                                        help='Extract the payload of the first matching box.')
+  extractParser.add_argument('-s', '--select', metavar='BOXSPEC', action='append', help='Box specifier.  May be given multiple times.  The first box that matches any specifier is extracted.')
+
   extractJxlParser = subparsers.add_parser('extract-jxl-codestream', parents=[inOutParser],
                                            help='Extract the raw JPEG XL codestream from a JXL container file.')
 
@@ -70,9 +74,11 @@ def main(argv):
     return doList(args.files)
   elif args.mode == 'count':
     return doCount(args.files, args.boxtype)
-  elif args.mode in ('extract-jxl-codestream', 'wrap-jxl-codestream', 'add', 'filter'):
+  elif args.mode in ('extract', 'extract-jxl-codestream', 'wrap-jxl-codestream', 'add', 'filter'):
     with openFileOrStdin(args.infile, 'rb') as infile, \
          openFileOrStdout(args.outfile, 'wb') as outfile:
+      if args.mode == 'extract':
+        return doExtractBox(infile, outfile, args.select)
       if args.mode == 'extract-jxl-codestream':
         return extractJxlCodestream(infile, outfile)
       if args.mode == 'wrap-jxl-codestream':
@@ -80,7 +86,9 @@ def main(argv):
         return addContainer(infile, outfile, jxll = args.level, splits=splits)
       if args.mode == 'add':
         return doAddBoxes(infile, outfile, args.box, args.encoding, args.at)
-      return doFilter(infile, outfile, args.keep is not None, args.keep if args.keep is not None else args.drop)
+      else: # mode == 'filter'
+        return doFilter(infile, outfile, args.keep is not None,
+                        args.keep if args.keep is not None else args.drop)
 
   return 0
 
@@ -314,6 +322,14 @@ def extractJxlCodestream(src, dst):
 
   return 0 if (seenJxlc or nextJxlp != 0) else 1
 
+
+def doExtractBox(src, dst, boxspecStrings):
+  if len(boxspecStrings) == 0:
+    sys.stderr.write('You must specify which box to extract using --select.\n')
+    return 2
+  return doScanBoxes(src, dst, MODE_EXTRACT_FIRST, boxspecStrings)
+
+
 def addContainer(src, dst, jxll=None, splits=None):
   """
   @param[in] splits If not None, this must be an iterable of ints giving byte offsets at
@@ -454,13 +470,19 @@ def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
   return 0
 
 def doFilter(src, dst, keep, boxspecStrings):
+  return doScanBoxes(src, dst, MODE_KEEP if keep else MODE_DROP, boxspecStrings)
+
+MODE_KEEP = 0
+MODE_DROP = 1
+MODE_EXTRACT_FIRST = 2
+
+def doScanBoxes(src, dst, mode, boxspecStrings):
   """
-  Copy src to dst, keeping or discarding specified boxes.
+  Copy all or parts of @p src to @p dst, depending on @p mode and @p boxspecs.
 
   @param src Readable file-like object for the input.
   @param dst Writable file-like object for the result.
-  @param keep True if we're whitelisting boxes to keep, False if we're blacklisting
-              boxes to drop.
+  @param mode See @ref scanBoxes.
   @param boxspecs List of box specifier strings determining which boxes are affected.
   """
   boxspecs = []
@@ -472,16 +494,18 @@ def doFilter(src, dst, keep, boxspecStrings):
                      BoxSpec('type=jumb')]
     else:
       boxspecs.append(BoxSpec(s))
-  return filterBoxes(src, dst, keep, boxspecs)
+  return scanBoxes(src, dst, mode, boxspecs)
 
-def filterBoxes(src, dst, keep, boxspecs):
+def scanBoxes(src, dst, mode, boxspecs):
   """
-  Copy src to dst, discarding specified boxes.
+  Copy all or parts of @p src to @p dst, depending on @p mode and @p boxspecs.
 
   @param src Readable file-like object for the input.
   @param dst Writable file-like object for the result.
-  @param keep True if we're whitelisting boxes to keep, False if we're blacklisting
-              boxes to drop.
+  @param mode MODE_KEEP if @p boxspecs is defining a whitelist of boxes to keep.
+              MODE_DROP if @p boxspecs is defining a blacklist of boxes to drop.
+              MODE_EXTRACT_FIRST if @p boxspecs is just used to identify the first
+                                 matching box.  Its payload will be the only thing output.
   @param boxspecs List of BoxSpec objects determining which boxes are affected.
   """
 
@@ -506,11 +530,21 @@ def filterBoxes(src, dst, keep, boxspecs):
           matches = True
           break
 
-      if (matches and keep) or (not matches and not keep):
+      if mode == MODE_EXTRACT_FIRST and matches:
+        # We have either read nothing, or we've read the header + 4 bytes
+        if len(boxStart) > 0:
+          dst.write(boxStart[-4:])
+          reader.copyCurrentBox(dst)
+        else:
+          reader.copyCurrentBoxPayload(dst)
+        return 0
+
+      if (mode == MODE_KEEP and matches) or (mode == MODE_DROP and not matches):
         dst.write(boxStart)
         reader.copyCurrentBox(dst)
       seen[innerType] += 1
-  return 0
+
+  return 1 if mode == MODE_EXTRACT_FIRST else 0
 
 
 def _writeBoxes(outfile, boxes, encoding, atEnd):

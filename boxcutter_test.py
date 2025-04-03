@@ -88,25 +88,56 @@ class TestCount(unittest.TestCase):
 
   def testCountRawJxl(self):
     with open(f'{TESTFILES}/pixel-raw.jxl', 'rb') as jxl:
-      jxl.seek(0)
       self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.RAW_JXL)
       jxl.seek(0)
       self.assertEqual(boxcutter.getBoxCount(jxl, boxtype='JXL '), boxcutter.RAW_JXL)
 
   def testCountSimple(self):
     with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as jxl:
-      jxl.seek(0)
       self.assertEqual(boxcutter.getBoxCount(jxl), 4)
       jxl.seek(0)
       self.assertEqual(boxcutter.getBoxCount(jxl, 'BBBB'), 1)
 
   def testCountInvalid(self):
     with io.BytesIO(b'\0') as jxl:
-      jxl.seek(0)
       self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.FAILED_PARSE)
     with io.BytesIO(b'\0\0\0\x09ABCD\0\0\0\x09EFGHx') as jxl:
-      jxl.seek(0)
       self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.FAILED_PARSE)
+
+class TestExtractBox(unittest.TestCase):
+
+  def testExtractNothing(self):
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src, \
+         io.BytesIO() as dst:
+      self.assertNotEqual(boxcutter.doExtractBox(src, dst, []), 0)
+      src.seek(0)
+      self.assertNotEqual(boxcutter.doExtractBox(src, dst, ['i=100']), 0)
+
+  def testExtractBox(self):
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src, \
+         io.BytesIO() as dst:
+      self.assertEqual(boxcutter.doExtractBox(src, dst, ['i=0']), 0)
+      self.assertEqual(dst.getvalue(), b'')
+
+      src.seek(0)
+      dst.seek(0)
+      dst.truncate()
+      self.assertEqual(boxcutter.doExtractBox(src, dst, ['i=1..']), 0)
+      self.assertEqual(dst.getvalue(), b'bbb')
+
+      src.seek(0)
+      dst.seek(0)
+      dst.truncate()
+      self.assertEqual(boxcutter.doExtractBox(src, dst, ['i=99', 'itype~=Cc?c']), 0)
+      self.assertEqual(dst.getvalue(), b'ccccc')
+
+    # Extracting a jxlc payload is the same as extracting the JXL codestream
+    with open(f'{TESTFILES}/pixel-jxlc.jxl', 'rb') as src, \
+         io.BytesIO() as dst1, io.BytesIO() as dst2:
+      self.assertEqual(boxcutter.doExtractBox(src, dst1, ['type=jxlc']), 0)
+      src.seek(0)
+      self.assertEqual(boxcutter.extractJxlCodestream(src, dst2), 0)
+      self.assertEqual(dst1.getvalue(), dst2.getvalue())
 
 
 class TestExtractCodestream(unittest.TestCase):
