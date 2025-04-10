@@ -83,26 +83,58 @@ class TestCatReader(unittest.TestCase):
 class TestCount(unittest.TestCase):
 
   def testCountEmpty(self):
-    self.assertEqual(boxcutter.getBoxCount(io.BytesIO()), 0)
-    self.assertEqual(boxcutter.getBoxCount(io.BytesIO(), boxtype='JXL '), 0)
+    for mode in (boxcutter.MODE_COUNT, boxcutter.MODE_HAS):
+      for boxspecList in ([], ['type=JXL ']):
+        self.assertEqual(boxcutter.doScanBoxes(io.BytesIO(), None, mode, boxspecList), 0,
+                         msg=f'mode={mode}; boxspecList={boxspecList}')
 
   def testCountRawJxl(self):
     with open(f'{TESTFILES}/pixel-raw.jxl', 'rb') as jxl:
-      self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.RAW_JXL)
-      jxl.seek(0)
-      self.assertEqual(boxcutter.getBoxCount(jxl, boxtype='JXL '), boxcutter.RAW_JXL)
+      for mode in (boxcutter.MODE_COUNT, boxcutter.MODE_HAS):
+        for boxspecList in ([], ['type=JXL ']):
+          self.assertEqual(boxcutter.doScanBoxes(jxl, None, mode, boxspecList),
+                           boxcutter.RAW_JXL,
+                           msg=f'mode={mode}; boxspecList={boxspecList}')
+          jxl.seek(0)
 
   def testCountSimple(self):
     with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as jxl:
-      self.assertEqual(boxcutter.getBoxCount(jxl), 4)
+      self.assertEqual(boxcutter.doScanBoxes(jxl, None, boxcutter.MODE_COUNT, None), 4)
       jxl.seek(0)
-      self.assertEqual(boxcutter.getBoxCount(jxl, 'BBBB'), 1)
+      self.assertEqual(boxcutter.doScanBoxes(jxl, None, boxcutter.MODE_HAS, None), 1)
+      jxl.seek(0)
+      self.assertEqual(boxcutter.doScanBoxes(jxl, None, boxcutter.MODE_COUNT,
+                                             ['type=BBBB']), 1)
+      jxl.seek(0)
+      self.assertEqual(boxcutter.doScanBoxes(jxl, None, boxcutter.MODE_HAS,
+                                             ['type=BBBB']), 1)
+
+    with open(f'{TESTFILES}/pixel-jxlp-stupid.jxl', 'rb') as jxl:
+      for mode,expect in ( (boxcutter.MODE_COUNT, 7), (boxcutter.MODE_HAS, 1)):
+        self.assertEqual(boxcutter.doScanBoxes(jxl, None, mode, ['i=0','type=jxlp']),
+                         expect, msg=f'mode={mode}')
+        jxl.seek(0)
 
   def testCountInvalid(self):
     with io.BytesIO(b'\0') as jxl:
-      self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.FAILED_PARSE)
+      for mode in (boxcutter.MODE_COUNT, boxcutter.MODE_HAS):
+        self.assertEqual(boxcutter.doScanBoxes(jxl, None, mode, None),
+                         boxcutter.FAILED_PARSE, msg=f'mode={mode}')
+        jxl.seek(0)
+    with io.BytesIO(b'\0\0\0\x09ABCD\0\0\0\x09EFGH\t') as jxl:
+      # Count notices the corrupt second box, Has stops early and doesn't.
+      for mode,expect in ((boxcutter.MODE_COUNT, boxcutter.FAILED_PARSE),
+                          (boxcutter.MODE_HAS, 1)):
+        self.assertEqual(boxcutter.doScanBoxes(jxl, None, mode, None), expect,
+                         msg=f'mode={mode}')
+        jxl.seek(0)
     with io.BytesIO(b'\0\0\0\x09ABCD\0\0\0\x09EFGHx') as jxl:
-      self.assertEqual(boxcutter.getBoxCount(jxl), boxcutter.FAILED_PARSE)
+      # Weird, but OK - parser is satisfied with 'FGHx' type, and doesn't read past the
+      # box header, so doesn't notice the file is way too short.
+      for mode,expect in ((boxcutter.MODE_COUNT,2), (boxcutter.MODE_HAS,1)):
+        self.assertEqual(boxcutter.doScanBoxes(jxl, None, mode, None), expect,
+                         msg=f'mode={mode}')
+        jxl.seek(0)
 
 class TestExtractBox(unittest.TestCase):
 

@@ -35,9 +35,20 @@ def main(argv):
   listParser = subparsers.add_parser('list', help='List all boxes in the named files.')
   listParser.add_argument('files', nargs='*')
 
-  countParser = subparsers.add_parser('count', help='Count boxes.')
-  countParser.add_argument('-t', '--type', dest='boxtype', help='Count only boxes of this specific type.')
-  countParser.add_argument('files', nargs='*')
+  countSelectParser = argparse.ArgumentParser(add_help=False)
+  countSelectParser.add_argument('-s', '--select', metavar='BOXSPEC', action='append',
+                                 help='Count only boxes that match the given specifier.' \
+                                 '  May be used multiple times to include more boxes in ' \
+                                 'the count.')
+  countSelectParser.add_argument('-v', '--verbose', action='store_true', help='Always print the filenames followed by the number of boxes counted.')
+  countSelectParser.add_argument('files', nargs='*')
+
+  countParser = subparsers.add_parser('count', parents=[countSelectParser],
+                                      help='Count boxes.')
+  countParser.add_argument('-t', '--type', dest='boxtype', help=argparse.SUPPRESS)
+
+  hasParser = subparsers.add_parser('has', parents=[countSelectParser],
+                                    help='Check for existence of boxes.')
 
   extractParser = subparsers.add_parser('extract', parents=[inOutParser],
                                         help='Extract the payload of the first matching box.')
@@ -72,8 +83,12 @@ def main(argv):
 
   if args.mode == 'list':
     return doList(args.files)
-  elif args.mode == 'count':
-    return doCount(args.files, args.boxtype)
+  elif args.mode == 'has' or args.mode == 'count':
+    if args.mode == 'count' and args.boxtype is not None:
+      if args.select is None:
+        args.select = []
+      args.select.append(f'TYPE={args.boxtype}')
+    return doCount(args.files, args.select, args.mode == 'has', verbose=args.verbose)
   elif args.mode in ('extract', 'extract-jxl-codestream', 'wrap-jxl-codestream', 'add', 'filter'):
     with openFileOrStdin(args.infile, 'rb') as infile, \
          openFileOrStdout(args.outfile, 'wb') as outfile:
@@ -107,18 +122,12 @@ def doList(filenames):
     zeroLengthLastBox = False
 
     with openFileOrStdin(filename, 'rb') as f:
-      firstBytes = f.read(8)
-      if firstBytes[:2] == b'\xff\x0a' and not isValid4cc(firstBytes[4:8]):
-        sys.stdout.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
-        if fi < len(filenames) - 1: sys.stdout.write('\n')
-        continue
-
       # Iterate through boxes in the file, saving metadata and any interesting details.
       try:
         boxList = []
         details = {}
         invalid = 'invalid?'
-        with CatReader(False, firstBytes, f) as source, BoxReader(source) as reader:
+        with BoxReader(f) as reader:
           for i,box in enumerate(reader):
             boxList.append(box)
 
@@ -163,6 +172,11 @@ def doList(filenames):
           if boxList[-1].length == 0:
             zeroLengthLastBox = True
             boxList[-1].length = reader.finalBoxSize()
+
+      except RawJxlError:
+        sys.stdout.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
+        if fi < len(filenames) - 1: sys.stdout.write('\n')
+        continue
       except Exception as ex:
         sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format; {ex}.\n')
         if fi < len(filenames) - 1: sys.stderr.write('\n')
@@ -211,57 +225,69 @@ def doList(filenames):
   return 0
 
 
-def doCount(filenames, boxtype=None, out=sys.stdout):
+def doCount(filenames, boxspecStrings, justCheck, verbose=False, out=sys.stdout):
+  """
+  Count matching boxes in the given files.
+
+  @param[in] filenames List of files to read.
+  @param[in] boxspecStrings Iterable of box specifiers to include in the count.  @c None
+                            to match all boxes. An empty iterable maches no boxes.
+  @param[in] verbose If False, and @p justCheck is True, don't produce any output.
+                     If False, and @p justCheck is False, and a single file is given,
+                     output only the number of matching boxes.
+                     Else output each quoted filename followed by the number of matching
+                     boxes counted in that file (which is never > 1 if @p justCheck is
+                     True).
+
+  @return 0 if @p justCheck is True and ALL files contain at least one matching box.
+  @return 0 if @p justCheck is False and the boxes were counted successfully (even if
+            no matches were found).
+  @return 1 otherwise.
+  """
   multipleFiles = len(filenames) > 1
+  mode = MODE_HAS if justCheck else MODE_COUNT
+  try:
+    boxspecs = boxspecStringsToBoxspecList(boxspecStrings)
+  except InvalidBoxSpec as ex:
+    sys.stderr.write(f'{ex}\n')
+    return 1
+
   usedStdin = False
+  retval = 0
+
   for i,filename in enumerate(filenames):
     if filename == '-':
       if usedStdin:
         sys.stderr.write('stdin can only be read once.\n')
+        if justCheck:
+          return 1
         if i < len(filenames) - 1: sys.stderr.write('\n')
         continue
       usedStdin = True
 
-    with openFileOrStdin(filename, 'rb') as f:
-      count = getBoxCount(f, boxtype=boxtype)
-      if count < 0:
-        if count == RAW_JXL:
-          sys.stderr.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
-        else:
-          sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format.\n')
-        continue
+    with openFileOrStdin(filename, 'rb') as src:
+      count = scanBoxes(src, dst=None, mode=mode, boxspecs=boxspecs)
+    if count < 0:
+      if count == RAW_JXL:
+        sys.stderr.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
+      else:
+        sys.stderr.write(f'{shlex.quote(filename)}: Failed to parse as ISO BMFF format.\n')
+      if justCheck and not verbose: return 1
+      retval = 1
+      continue
 
-    if multipleFiles:
+    if verbose or multipleFiles:
       out.write(f'{shlex.quote(filename)}: ')
-    out.write(str(count))
-    out.write('\n')
+    if verbose or not justCheck:
+      out.write(str(count))
+      out.write('\n')
+    if justCheck and count == 0:
+      if not verbose: return 1
+      retval = 1
 
-  return 0
+  return retval
 
-RAW_JXL = -1
-FAILED_PARSE = -2
 
-def getBoxCount(src, boxtype=None):
-  """
-  @param src Readable binary file-like object.
-  @param boxtype Only count this box type.
-
-  @return The number of boxes in the file if successful.
-  @return RAW_JXL if the input looks like a raw JXL codestream (not a container).
-  @return FAILED_PARSE otherwise.
-  """
-  firstBytes = src.read(2)
-  if firstBytes == b'\xff\x0a':
-    return RAW_JXL
-  count = 0
-  try:
-    with CatReader(False, firstBytes, src) as source, BoxReader(source) as reader:
-      for box in reader:
-        if boxtype is None or box.boxtype.decode('ascii', errors='replace') == boxtype:
-          count += 1
-  except Exception:
-    return FAILED_PARSE
-  return count
 
 def extractJxlCodestream(src, dst):
 
@@ -475,16 +501,18 @@ def doFilter(src, dst, keep, boxspecStrings):
 MODE_KEEP = 0
 MODE_DROP = 1
 MODE_EXTRACT_FIRST = 2
+MODE_COUNT = 3
+MODE_HAS = 4
 
-def doScanBoxes(src, dst, mode, boxspecStrings):
-  """
-  Copy all or parts of @p src to @p dst, depending on @p mode and @p boxspecs.
+RAW_JXL = -1
+FAILED_PARSE = -2
 
-  @param src Readable file-like object for the input.
-  @param dst Writable file-like object for the result.
-  @param mode See @ref scanBoxes.
-  @param boxspecs List of box specifier strings determining which boxes are affected.
+def boxspecStringsToBoxspecList(boxspecStrings):
   """
+  Parse an iterable of boxspec strings and return a list of BoxSpec objects.
+  Raises InvalidBoxSpec if any specifier isn't valid.
+  """
+  if boxspecStrings is None: return None
   boxspecs = []
   for s in boxspecStrings:
     if s in ('@jxl', '@JXL'):
@@ -494,57 +522,87 @@ def doScanBoxes(src, dst, mode, boxspecStrings):
                      BoxSpec('type=jumb')]
     else:
       boxspecs.append(BoxSpec(s))
-  return scanBoxes(src, dst, mode, boxspecs)
+  return boxspecs
+
+def doScanBoxes(src, dst, mode, boxspecStrings):
+  """
+  Wrapper for @ref doScanBoxes that translates boxspec strings into objects.
+  """
+  return scanBoxes(src, dst, mode, boxspecStringsToBoxspecList(boxspecStrings))
 
 def scanBoxes(src, dst, mode, boxspecs):
   """
   Copy all or parts of @p src to @p dst, depending on @p mode and @p boxspecs.
 
   @param src Readable file-like object for the input.
-  @param dst Writable file-like object for the result.
+  @param dst Writable file-like object for the result.  May be None for read-only modes.
   @param mode MODE_KEEP if @p boxspecs is defining a whitelist of boxes to keep.
               MODE_DROP if @p boxspecs is defining a blacklist of boxes to drop.
               MODE_EXTRACT_FIRST if @p boxspecs is just used to identify the first
                                  matching box.  Its payload will be the only thing output.
+              MODE_COUNT to return the number of boxes that match any element of
+                         @p boxspecs, or the total number of boxes if @p boxspecs is None.
+              MODE_HAS is like MODE_COUNT, but stops after counting max 1 box.
+
   @param boxspecs List of BoxSpec objects determining which boxes are affected.
+
+  @return RAW_JXL if the input appears to be a raw codestream.
+  @return FAILED_PARSE if the input couldn't be parsed for some other reason.
+  If mode is @c MODE_KEEP, @c MODE_DROP, or @c MODE_EXTRACT_FIRST, @return 0 on success,
+  else 1.
+  If mode is @c MODE_COUNT or @c MODE_HAS: @return the number of matching boxes (limited
+  to 1 for MODE_HAS).
   """
-
   seen = collections.defaultdict(lambda : 0)
+  matchCount = 0 # Only updated for MODE_COUNT
 
-  with BoxReader(src) as reader:
-    for i,box in enumerate(reader):
-      innerType = box.boxtype
-      boxStart = b''
-      if box.boxtype == b'brob':
-        # Read the inner type.  Don't use readCurrentBoxPayload, as we might want to copy
-        # the header later.
-        want = 20 if box.hasExtendedSize else 12
-        boxStart = reader.readCurrentBox(want)
-        innerType = boxStart[-4:]
-        if len(boxStart) != want or not isValid4cc(innerType):
-          raise InvalidBmffError(f"Invalid `brob` box at position {i}.")
+  try:
+    with BoxReader(src) as reader:
 
-      matches = False
-      for boxspec in boxspecs:
-        if boxspec.matches(i, box, innerType, seen[innerType]):
-          matches = True
-          break
+      for i,box in enumerate(reader):
+        innerType = box.boxtype
+        boxStart = b''
+        if box.boxtype == b'brob':
+          # Read the inner type.  Don't use readCurrentBoxPayload, as we might want to copy
+          # the header later.
+          want = 20 if box.hasExtendedSize else 12
+          boxStart = reader.readCurrentBox(want)
+          innerType = boxStart[-4:]
+          if len(boxStart) != want or not isValid4cc(innerType):
+            raise InvalidBmffError(f"Invalid `brob` box at position {i}.")
 
-      if mode == MODE_EXTRACT_FIRST and matches:
-        # We have either read nothing, or we've read the header + 4 bytes
-        if len(boxStart) > 0:
-          dst.write(boxStart[-4:])
+        matches = boxspecs is None or any(
+            map(lambda b : b.matches(i, box, innerType, seen[innerType]), boxspecs)
+          )
+        #sys.stderr.write(f'{box} {"matches" if matches else "does not match"}.\n')
+
+        if mode == MODE_EXTRACT_FIRST and matches:
+          # We have either read nothing, or we've read the header + 4 bytes
+          if len(boxStart) > 0:
+            dst.write(boxStart[-4:])
+            reader.copyCurrentBox(dst)
+          else:
+            reader.copyCurrentBoxPayload(dst)
+          return 0
+
+        elif (mode == MODE_KEEP and matches) or (mode == MODE_DROP and not matches):
+          dst.write(boxStart)
           reader.copyCurrentBox(dst)
-        else:
-          reader.copyCurrentBoxPayload(dst)
-        return 0
 
-      if (mode == MODE_KEEP and matches) or (mode == MODE_DROP and not matches):
-        dst.write(boxStart)
-        reader.copyCurrentBox(dst)
-      seen[innerType] += 1
+        elif mode in (MODE_COUNT, MODE_HAS) and matches:
+          if mode == MODE_HAS: return 1
+          matchCount += 1
 
-  return 1 if mode == MODE_EXTRACT_FIRST else 0
+        seen[innerType] += 1
+
+  except RawJxlError:
+    return RAW_JXL
+  except InvalidBmffError:
+    return FAILED_PARSE
+
+  return 1 if mode == MODE_EXTRACT_FIRST else \
+         matchCount if mode == MODE_COUNT else \
+         0
 
 
 def _writeBoxes(outfile, boxes, encoding, atEnd):
@@ -624,6 +682,11 @@ def writeBoxHeader(to, boxtype, payloadSize):
 
 def isValid4cc(bytes4):
   return len(bytes4) == 4 and all(map(lambda b : (b >= 0x20 and b <= 0x7e), bytes4))
+def isValidBoxType(str4):
+  try:
+    return isValid4cc(str4.encode('ASCII'))
+  except UnicodeError:
+    return False
 
 def openFileOrStdin(name, *args, **kwargs):
   return (sys.stdin.buffer if name == '-' else open(name, *args, **kwargs))
@@ -719,7 +782,9 @@ class BoxSpec:
 
       # TODO: come up with some syntax for "nth instance of this type"
 
-      raise InvalidBoxSpec(f'Unknown box specifier "{boxspec}"')
+    quotedBoxSpec = shlex.quote(boxspec)
+    hint = f'.  Did you mean type={quotedBoxSpec}?' if isValidBoxType(boxspec) else ''
+    raise InvalidBoxSpec(f'Unknown box specifier, {quotedBoxSpec}{hint}')
 
   def matches(self, i, box, innerType, instance):
     if self.indexRange is not None and \
@@ -747,6 +812,10 @@ class BoxCutterException(Exception):
 
 class InvalidBmffError(BoxCutterException):
   """File doesn't seem to be in ISO BMFF-like format."""
+  pass
+
+class RawJxlError(InvalidBmffError):
+  """File is a raw JXL codestream."""
   pass
 
 class InvalidJxlContainerError(BoxCutterException):
@@ -779,6 +848,11 @@ class BoxDetails:
 
   def clone(self):
     return BoxDetails(self.offset, self.length, self.boxtype, self.hasExtendedSize)
+
+  def __str__(self):
+    return f'{self.length}-byte {shlex.quote(self.boxtype.decode("ASCII"))} box' \
+           f'{" with extended size" if self.hasExtendedSize else ""}' \
+           f' at offset 0x{self.offset:x}'
 
 
 class BoxReader:
@@ -873,6 +947,10 @@ class BoxReader:
     except InvalidBmffError as ex:
       sys.stderr.write(f'Truncated header for box index {self._index}.\n')
       raise
+    # First box: check for raw JXL codestream
+    if self._index == 0 and self._currentBoxHeader.startswith(b'\xff\n') and \
+       not isValid4cc(self._currentBoxHeader[4:]):
+      raise RawJxlError()
     if len(self._currentBoxHeader) == 0:
       # No more boxes
       self._eof = True

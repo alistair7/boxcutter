@@ -36,7 +36,7 @@ boxcutter can:
 - Wrap a raw JXL codestream in the container format (`wrap-jxl-codestream`).
 - Generate certain optional boxes that are meaningful to JPEG XL decoders (specifically,
   `jxll`).
-- Identify JXLs that contain JPEG reconstruction data (via `count --type=jbrd`).
+- Identify JXLs that contain JPEG reconstruction data (via `has --select=TYPE=jbrd`).
 
 It CANNOT decode the JXL codestream, so it can't read or modify any properties of the
 image (pixels, dimensions, depth, channels, frames, color space).
@@ -83,20 +83,54 @@ length is implied by the number of bytes remaining in the file.
 `type` is a 4-character printable ASCII string (4CC) identifying the box type.
 
 #### `count`
-Prints the total number of boxes in the file, or the number of boxes of a specified type:
+Prints the total number of boxes in the file.  If one or more box specifiers are given
+(see Box Specifiers below), only boxes that match ANY of these specifiers are counted.
+
+Usage:
+
+```
+boxcutter.py count [-s BOXSPEC] [-v] [files ...]
+
+options:
+  -s BOXSPEC, --select BOXSPEC
+                        Count only boxes that match the given specifier. May be used multiple times to include more boxes in the count.
+  -v, --verbose         Always print the filenames followed by the number of boxes counted.
+
+```
+
+Example:
 
 ```
 $ boxcutter.py count file.jxl
 6
 
-$ boxcutter.py count --type=brob file.jxl
-2
+$ boxcutter.py count -v --select=TYPE=brob file.jxl
+file.jxl: 2
 ```
+
+#### `has`
+This mode is a streamlined version of `count`, which just tells you whether or not a
+matching box exists.  If a matching box exists in ALL input files, the exit status is 0;
+otherwise it's non-zero.
+
+Supported options are identical to `count`.
 
 #### `extract`
 Extracts the payload of a single box.  You must pass at least one box specifier (see Box
 Specifiers below).  The *first box* that matches any of the specifiers is chosen, and its
 payload is written to the output.
+
+Usage:
+
+```
+boxcutter.py extract [-s BOXSPEC] [infile] [outfile]
+
+options:
+  -s BOXSPEC, --select BOXSPEC
+                        Box specifier. May be given multiple times. The first box that matches any specifier is extracted.
+```
+
+Example:
 
 ```
 $ boxcutter.py extract --select 'type=xml ' < in.jxl > out.xml
@@ -129,6 +163,19 @@ Color space: 672-byte ICC profile, CMM type: "lcms", color space: "RGB ", render
 
 #### `wrap-jxl-codestream`
 Converts a raw JXL codestream to a JXL in container format.
+
+Usage:
+
+```
+boxcutter.py wrap-jxl-codestream [--level N] [--splits OFFSET,OFFSET,...] [infile] [outfile]
+
+options:
+  --level N, -l N       Add a codestream level declaration to the file, for level N (adds a `jxll` box to the output).
+  --splits OFFSET,OFFSET,..., -s OFFSET,OFFSET,...
+                        Write several `jxlp` boxes instead of a single `jxlc` box, splitting the codestream at these byte offsets.
+```
+
+Example:
 
 ```
 $ boxcutter.py wrap-jxl-codestream < raw.jxl > container.jxl
@@ -196,6 +243,20 @@ The argument to `--box` is a string in one of two formats:
 - `«TYPE»@«FILENAME»` creates a box of type `«TYPE»` with its content read from the
   existing file named `«FILENAME»`.  `«FILENAME»` may be `-` to read data from stdin
   (unless stdin is already being used to read another box or the main input file).
+
+Usage:
+
+```
+boxcutter.py add [--at AT] [--box BOX] [--encoding ENCODING] [infile] [outfile]
+
+options:
+  --at AT              Position to insert the boxes. Valid indexes range from 0 to the current box count. Default is -1, which appends the new boxes.
+  --box BOX            Box specifier in the format "TYPE=DATA" (to create a box of type TYPE with content DATA) or "TYPE@FILE" (to set the box content from a file named FILE. FILE may be '-' to read box content from stdin. Boxes are added in the order they are
+                       passed.
+  --encoding ENCODING  When setting box content from the command line (TYPE=...), encode the text value using this character encoding. Default is UTF-8.
+```
+
+Example:
 
 ```
 $ boxcutter.py list oldfile.bin
@@ -270,6 +331,16 @@ This mode is for removing or modifying existing boxes.  You can either specify w
 boxes to keep (`--keep`), or which boxes to remove (`--drop`).  These options both accept
 a box specifier (see Box Specifiers below).  Either can be used multiple times in a
 command, but they can't be mixed.
+
+Usage:
+
+```
+boxcutter.py filter [--drop BOXSPEC | --keep BOXSPEC] [infile] [outfile]
+
+options:
+  --drop BOXSPEC  Remove the specified box(es).
+  --keep BOXSPEC  Keep only the specified box(es).
+```
 
 Other than printing warnings in certain cases, `filter` mode makes no attempt to stop you
 creating invalid JPEG XL files, which is easy to do by removing critical boxes.
@@ -361,7 +432,7 @@ these box types before it knows whether a `jbrd` box is present.  A clumsy worka
 for this is:
 
 ```bash
-if [ "$(boxcutter.py count --type=jbrd in.jxl)" -gt 0 ]; then
+if boxcutter.py has -sTYPE=jbrd in.jxl; then
   boxspec=@JXL
 else
   boxspec=@jxl
