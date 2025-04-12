@@ -171,6 +171,41 @@ class TestExtractBox(unittest.TestCase):
       self.assertEqual(boxcutter.extractJxlCodestream(src, dst2), 0)
       self.assertEqual(dst1.getvalue(), dst2.getvalue())
 
+  def testDecompressBox(self):
+    if not boxcutter.HAVE_BROTLI:
+      return
+
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      self.assertEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'], decompressMax=-1),
+                       0)
+      decompressedExif = dst.getvalue()
+      self.assertEqual(decompressedExif[:8], b'\0\0\0\0II*\0')
+      self.assertEqual(len(decompressedExif), 264)
+
+      dst.seek(0)
+      dst.truncate()
+      src.seek(0)
+      self.assertEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'], decompressMax=264),
+                       0)
+      self.assertEqual(len(dst.getvalue()), 264)
+
+      dst.seek(0)
+      dst.truncate()
+      src.seek(0)
+      self.assertNotEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'],
+                          decompressMax=263), 0)
+      self.assertTrue(len(dst.getvalue()) <= 263)
+
+      dst.seek(0)
+      dst.truncate()
+      src.seek(0)
+      try:
+        boxcutter.HAVE_BROTLI = False
+        self.assertNotEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'],
+                                                   decompressMax=-1), 0)
+      finally:
+        boxcutter.HAVE_BROTLI = True
 
 class TestExtractCodestream(unittest.TestCase):
 
@@ -510,6 +545,36 @@ class TestIsValid4cc(unittest.TestCase):
              (b'abc\x1F', False))
     for b, expect in tests:
       self.assertEqual(boxcutter.isValid4cc(b), expect, msg=f'Unexpected result for {b}')
+
+class TestDecodeSize(unittest.TestCase):
+
+  def testPlainNumber(self):
+    for arg,expect in (('',       None),
+                       (' ',      None),
+                       ('0',      0),
+                       ('-0',     0),
+                       ('1',      1),
+                       ('1 B',      1),
+                       (' 1 ',    1),
+                       (' -1 ',   -1),
+                       ('k',      None),
+                       ('0k',     0),
+                       ('1k',     1000),
+                       ('1ki',    1024),
+                       (' 1 K ',  1000),
+                       (' 1 KIB', 1024),
+                       ('123kb',  123000),
+                       ('123kbs', None),
+                       ('2M',     2_000_000),
+                       ('1.1M',   None),
+                       ('2 Gi',   2147483648),
+                       ('-2TB',   -2_000_000_000_000),
+                       ):
+      if expect is None:
+        with self.assertRaises(ValueError, msg=arg):
+          boxcutter.decodeSize(arg)
+      else:
+        self.assertEqual(boxcutter.decodeSize(arg), expect, msg=arg)
 
 if __name__ == '__main__':
     unittest.main()

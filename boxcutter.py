@@ -16,6 +16,13 @@ import struct
 import sys
 import uuid
 
+try:
+  import brotli
+  HAVE_BROTLI = True
+except ImportError:
+  HAVE_BROTLI = False
+
+IO_BLOCK_SIZE = 16384
 JXL_CONTAINER_SIG = b'\0\0\0\x0cJXL \r\n\x87\n'
 
 # Boxes bigger than this require extended box size
@@ -53,6 +60,15 @@ def main(argv):
   extractParser = subparsers.add_parser('extract', parents=[inOutParser],
                                         help='Extract the payload of the first matching box.')
   extractParser.add_argument('-s', '--select', metavar='BOXSPEC', action='append', help='Box specifier.  May be given multiple times.  The first box that matches any specifier is extracted.')
+  extractParser.add_argument('-d', '--decompress', action='store_true',
+                             help='Decompress `brob` boxes when extracting, outputting ' \
+                                  'the payload of the inner box.' \
+                                  if HAVE_BROTLI else argparse.SUPPRESS)
+  extractParser.add_argument('-D', '--decompress-max', metavar='SIZE', default=None,
+                             help='Abort if the box decompresses to more than SIZE ' \
+                                  'bytes.  SI and IEC suffixes are allowed.  The ' \
+                                  'default is 1GB.  Use -1 for no maximum.' \
+                                  if HAVE_BROTLI else argparse.SUPPRESS)
 
   extractJxlParser = subparsers.add_parser('extract-jxl-codestream', parents=[inOutParser],
                                            help='Extract the raw JPEG XL codestream from a JXL container file.')
@@ -93,7 +109,11 @@ def main(argv):
     with openFileOrStdin(args.infile, 'rb') as infile, \
          openFileOrStdout(args.outfile, 'wb') as outfile:
       if args.mode == 'extract':
-        return doExtractBox(infile, outfile, args.select)
+        decompressMax = 0
+        if args.decompress:
+          decompressMax = 1_000_000_000 if args.decompress_max is None \
+                                        else decodeSize(args.decompress_max)
+        return doExtractBox(infile, outfile, args.select, decompressMax)
       if args.mode == 'extract-jxl-codestream':
         return extractJxlCodestream(infile, outfile)
       if args.mode == 'wrap-jxl-codestream':
@@ -349,12 +369,60 @@ def extractJxlCodestream(src, dst):
   return 0 if (seenJxlc or nextJxlp != 0) else 1
 
 
-def doExtractBox(src, dst, boxspecStrings):
+def doExtractBox(src, dst, boxspecStrings, decompressMax=0):
   if len(boxspecStrings) == 0:
     sys.stderr.write('You must specify which box to extract using --select.\n')
     return 2
-  return doScanBoxes(src, dst, MODE_EXTRACT_FIRST, boxspecStrings)
+  if decompressMax != 0 and not HAVE_BROTLI:
+    sys.stderr.write('Cannot decompress boxes without the `brotli` package.')
+    return 2
+  retval = doScanBoxes(src, dst, MODE_EXTRACT_FIRST, boxspecStrings,
+                       decompressMax=decompressMax)
+  if retval == DECOMP_TOO_BIG:
+    sys.stderr.write(f'Aborted because the box decompressed to over {decompressMax} ' \
+                     'bytes.  Try passing a larger value to --decompress-max (-1 for no' \
+                     ' limit).\n')
+    return 2
+  elif retval != 0:
+    sys.stderr.write('Failed to extract any box.\n')
+    return 2
+  return 0
 
+def decodeSize(sz):
+  """
+  Convert a @c str to an @c int, intepreting SI/IEC suffixes.
+
+  Suffixes of k, m, g, and t are supported, for kilo-, mega-, giga-, and tera- and these
+  multiply the numeric part by the corresponding power of 1000.  For 1024-based multiples,
+  use ki, mi, gi, ti.  Not case sensitive.  Leading and trailing spaces are ignored, as
+  are spaces between the digits and the suffix.  A 'b' following the suffix is allowed and
+  ignored.
+
+  e.g.
+  "1"      -> 1
+  "1K"     -> 1000
+  "1 kb"   -> 1000
+  "1Ki"    -> 1024
+  " 1KiB " -> 1024
+
+  For inputs consisting only of digits 0-9, this function is equivalent to @c int(sz).
+  Raises ValueError if the format is incorrect.
+  """
+  import re
+  match = re.match('^ *(-?[0-9]+) *([kmgt]i?)?b? *$', sz.lower())
+  if not match:
+    raise ValueError(f'Invalid size string "{sz}"')
+  suffix = match.group(2)
+  mult = 1000 if suffix == 'k'  else \
+         1024 if suffix == 'ki' else \
+         1000 * 1000 if suffix == 'm'  else \
+         1024 * 1024 if suffix == 'mi' else \
+         1000 * 1000 * 1000 if suffix == 'g'  else \
+         1024 * 1024 * 1024 if suffix == 'gi' else \
+         1000 * 1000 * 1000 * 1000 if suffix == 't'  else \
+         1024 * 1024 * 1024 * 1024 if suffix == 'ti' else \
+         1
+  return mult * int(match.group(1))
 
 def addContainer(src, dst, jxll=None, splits=None):
   """
@@ -506,6 +574,7 @@ MODE_HAS = 4
 
 RAW_JXL = -1
 FAILED_PARSE = -2
+DECOMP_TOO_BIG = -3
 
 def boxspecStringsToBoxspecList(boxspecStrings):
   """
@@ -524,13 +593,14 @@ def boxspecStringsToBoxspecList(boxspecStrings):
       boxspecs.append(BoxSpec(s))
   return boxspecs
 
-def doScanBoxes(src, dst, mode, boxspecStrings):
+def doScanBoxes(src, dst, mode, boxspecStrings, decompressMax=0):
   """
   Wrapper for @ref doScanBoxes that translates boxspec strings into objects.
   """
-  return scanBoxes(src, dst, mode, boxspecStringsToBoxspecList(boxspecStrings))
+  return scanBoxes(src, dst, mode, boxspecStringsToBoxspecList(boxspecStrings),
+                   decompressMax)
 
-def scanBoxes(src, dst, mode, boxspecs):
+def scanBoxes(src, dst, mode, boxspecs, decompressMax=0):
   """
   Copy all or parts of @p src to @p dst, depending on @p mode and @p boxspecs.
 
@@ -545,8 +615,13 @@ def scanBoxes(src, dst, mode, boxspecs):
               MODE_HAS is like MODE_COUNT, but stops after counting max 1 box.
 
   @param boxspecs List of BoxSpec objects determining which boxes are affected.
+  @param[in] decompressMax (Only for MODE_EXTRACT_FIRST) If 0, do not decompress `brob`
+                           boxes.  If > 0, decompress `brob` boxes but fail if any exceed
+                           this number of decompressed bytes.  If < 0, decompress `brob`
+                           boxes with no restriction on size.
 
   @return RAW_JXL if the input appears to be a raw codestream.
+  @return DECOMP_TOO_BIG if the decompressed data from a box exceeded @p decompressMax.
   @return FAILED_PARSE if the input couldn't be parsed for some other reason.
   If mode is @c MODE_KEEP, @c MODE_DROP, or @c MODE_EXTRACT_FIRST, @return 0 on success,
   else 1.
@@ -578,11 +653,30 @@ def scanBoxes(src, dst, mode, boxspecs):
 
         if mode == MODE_EXTRACT_FIRST and matches:
           # We have either read nothing, or we've read the header + 4 bytes
-          if len(boxStart) > 0:
-            dst.write(boxStart[-4:])
-            reader.copyCurrentBox(dst)
+          if decompressMax != 0 and box.boxtype == b'brob':
+            # TODO: make use of max_output_size after brotli version 1.1.0.
+            decompSize = 0
+            decompressor = brotli.Decompressor()
+            while True:
+              compBlock = reader.readCurrentBox(IO_BLOCK_SIZE)
+              if len(compBlock) == 0: break
+              decompBlock = decompressor.process(compBlock)
+              decompSize += len(decompBlock) 
+              if decompressMax > 0 and decompSize > decompressMax:
+                return DECOMP_TOO_BIG
+              dst.write(decompBlock)
+            while not decompressor.is_finished():
+              decompBlock = decompressor.process(b'')
+              decompSize += len(decompBlock) 
+              if decompressMax > 0 and decompSize > decompressMax:
+                return DECOMP_TOO_BIG
+              dst.write(decompBlock)
           else:
-            reader.copyCurrentBoxPayload(dst)
+            if len(boxStart) > 0:
+              dst.write(boxStart[-4:])
+              reader.copyCurrentBox(dst)
+            else:
+              reader.copyCurrentBoxPayload(dst)
           return 0
 
         elif (mode == MODE_KEEP and matches) or (mode == MODE_DROP and not matches):
@@ -726,9 +820,8 @@ def copyData(src, dst, count = -1):
 
   # Slow read/write loop
   # TODO: use os.sendfile on Linux
-  blockSize = 4096
   while count < 0 or done < count:
-    want = min(blockSize, count-done) if count >= 0 else blockSize
+    want = min(IO_BLOCK_SIZE, count-done) if count >= 0 else IO_BLOCK_SIZE
     block = src.read(want)
     if len(block) == 0:
       if count >= 0:
@@ -1053,9 +1146,8 @@ class BoxReader:
     TODO: faster implementation.
     """
     remain = n
-    blockSize = 8192
     while remain > 0:
-      want = min(remain, blockSize)
+      want = min(remain, IO_BLOCK_SIZE)
       skipped = self.readCurrentBoxPayload(want)
       remain -= len(skipped)
       if len(skipped) < want:
@@ -1127,9 +1219,8 @@ class BoxReader:
     TODO: faster implementation.
     """
     remain = n
-    blockSize = 8192
     while remain > 0:
-      want = min(remain, blockSize)
+      want = min(remain, IO_BLOCK_SIZE)
       skipped = self.readCurrentBox(want)
       remain -= len(skipped)
       if len(skipped) < want:
@@ -1162,10 +1253,9 @@ class BoxReader:
       return count
     if count < 0:
       raise UsageError("Can't seek backwards in a non-seekable file.")
-    blockSize = 8192
     done = 0
     while done < count:
-      block = self._file.read(min(blockSize, count-done))
+      block = self._file.read(min(IO_BLOCK_SIZE, count-done))
       self._off += len(block)
       if len(block) == 0:
         if exact:
@@ -1276,7 +1366,6 @@ class CatReader:
       self._off += n
       return self._off
 
-    blockSize = 8192
     stillWant = n
     while True:
       currentFile = self._files[self._currentFileIx]
@@ -1301,7 +1390,7 @@ class CatReader:
       else:
         # Read and discard until we've skipped enough bytes or we get to local EOF
         while True:
-          want = min(blockSize, stillWant)
+          want = min(IO_BLOCK_SIZE, stillWant)
           ignored = currentFile.read(want)
           skipped = len(ignored)
           self._off += skipped

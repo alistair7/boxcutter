@@ -41,9 +41,16 @@ boxcutter can:
 It CANNOT decode the JXL codestream, so it can't read or modify any properties of the
 image (pixels, dimensions, depth, channels, frames, color space).
 
-It CANNOT encode or decode the content of Brotli-compressed (`brob`) boxes, beyond
-identifying the type of the compressed box.  (But this is planned for later.)
+### Installation
+No installation is needed.  Just download and run boxcutter.py.
 
+boxcutter has an optional dependency on the [Brotli](https://pypi.org/project/Brotli/)
+Python package from Google.  This allows it to compress and decompress `brob` boxes:
+
+`python3 -m pip install brotli`
+
+Everything else will work fine without Brotli - just some options related to `brob`
+handling will be disabled.
 
 ### Modes
 
@@ -123,12 +130,29 @@ payload is written to the output.
 Usage:
 
 ```
-boxcutter.py extract [-s BOXSPEC] [infile] [outfile]
+boxcutter.py extract [-s BOXSPEC] [-d] [-D SIZE] [infile] [outfile]
 
 options:
   -s BOXSPEC, --select BOXSPEC
                         Box specifier. May be given multiple times. The first box that matches any specifier is extracted.
+  -d, --decompress      Decompress `brob` boxes when extracting, outputting the payload of the inner box.
+  -D SIZE, --decompress-max SIZE
+                        Abort if the box decompresses to more than SIZE bytes. SI and IEC suffixes are allowed. The default is 1GB. Use -1 for no maximum.
 ```
+
+The `--decompress` options are only available if the `brotli` package is installed.
+
+***DoS Warning***
+The Python API for the latest release of `brotli` at the time of writing (v1.1.0) doesn't
+allow callers to limit the length of decompressed data produced from a given chunk
+of compressed input, so it may be possible for a malicious file to cause arbitrarily large
+memory allocations.  This has been addressed in the development version of `brotli`, but
+as yet it's unreleased.  Decompress untrusted boxes at your own risk.
+
+The SIZE argument to `--decompress-max` understands SI (k, M, G, T) and IEC (Ki, Mi, Gi,
+Ti) suffixes.  The suffix is not case sensitive, and in all cases a trailing 'b' is
+allowed and ignored.  This protects against excessive disk usage, but not excessive memory
+usage inside brotli.
 
 Example:
 
