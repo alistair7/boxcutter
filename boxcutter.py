@@ -82,7 +82,7 @@ def main(argv):
                                     help='Add one or more metadata boxes to the file.')
   addParser.add_argument('--at', default=-1, type=int, help='Position to insert the boxes.  Valid indexes range from 0 to the current box count.  Default is -1, which appends the new boxes.')
   addParser.add_argument('--box', action='append',
-                         help='Box specifier in the format "TYPE=DATA" ' \
+                         help='Box description in the format "TYPE=DATA" ' \
                               '(to create a box of type TYPE with content DATA) or ' \
                               '"TYPE@FILE" (to set the box content from a file named ' \
                               'FILE.  FILE may be \'-\' to read box content from stdin.' \

@@ -1,5 +1,5 @@
 # boxcutter
-Utility for displaying and manipulating JPEG XL container files (ISO/IEC 18181-2).
+Utility for examining and manipulating JPEG XL container files (ISO/IEC 18181-2).
 
 This project will hopefully be made redundant by libjxl's planned
 [`jxltran`](https://github.com/libjxl/libjxl/issues/871) utility.
@@ -10,11 +10,11 @@ conform to ISO/IEC 14496-12.  e.g., MP4, HEIF (HEIC, AVIF), JPEG2000.
 
 ### General Features
 - Display information about the boxes (type, offset, length) that compose the file
-  (`list`).
-- Append or insert additional boxes with a specified type and content (`add`).
-- Remove specified boxes (`filter`).
-- Export boxes - as full boxes including headers (`filter`), or just the payload
-  (`extract`).
+  ([`list`](#list)).
+- Append or insert additional boxes with a specified type and content ([`add`](#add)).
+- Remove specified boxes ([`filter`](#filter)).
+- Export boxes - as full boxes including headers ([`filter`](#filter)), or just the payload
+  ([`extract`](#extract)).
 
 The *content* of boxes is treated as opaque data, with some very limited exceptions.
 
@@ -32,8 +32,10 @@ information such as metadata to be included.
 
 boxcutter can:
 
-- Extract the raw JXL codestream from a container (`extract-jxl-codestream`).
-- Wrap a raw JXL codestream in the container format (`wrap-jxl-codestream`).
+- Extract the raw JXL codestream from a container
+  ([`extract-jxl-codestream`](#extract-jxl-codestream)).
+- Wrap a raw JXL codestream in the container format
+  ([`wrap-jxl-codestream`](#wrap-jxl-codestream)).
 - Generate certain optional boxes that are meaningful to JPEG XL decoders (specifically,
   `jxll`).
 - Identify JXLs that contain JPEG reconstruction data (via `has --select=TYPE=jbrd`).
@@ -91,7 +93,8 @@ length is implied by the number of bytes remaining in the file.
 
 #### `count`
 Prints the total number of boxes in the file.  If one or more box specifiers are given
-(see Box Specifiers below), only boxes that match ANY of these specifiers are counted.
+(see [Box Specifiers](#box-specifiers) below), only boxes that match ANY of these
+specifiers are counted.
 
 Usage:
 
@@ -123,9 +126,9 @@ otherwise it's non-zero.
 Supported options are identical to `count`.
 
 #### `extract`
-Extracts the payload of a single box.  You must pass at least one box specifier (see Box
-Specifiers below).  The *first box* that matches any of the specifiers is chosen, and its
-payload is written to the output.
+Extracts the payload of a single box.  You must pass at least one box specifier (see
+[Box Specifiers](#box-specifiers) below).  The *first box* that matches any of the
+specifiers is chosen, and its payload is written to the output.
 
 Usage:
 
@@ -275,7 +278,7 @@ boxcutter.py add [--at AT] [--box BOX] [--encoding ENCODING] [infile] [outfile]
 
 options:
   --at AT              Position to insert the boxes. Valid indexes range from 0 to the current box count. Default is -1, which appends the new boxes.
-  --box BOX            Box specifier in the format "TYPE=DATA" (to create a box of type TYPE with content DATA) or "TYPE@FILE" (to set the box content from a file named FILE. FILE may be '-' to read box content from stdin. Boxes are added in the order they are
+  --box BOX            Box description in the format "TYPE=DATA" (to create a box of type TYPE with content DATA) or "TYPE@FILE" (to set the box content from a file named FILE. FILE may be '-' to read box content from stdin. Boxes are added in the order they are
                        passed.
   --encoding ENCODING  When setting box content from the command line (TYPE=...), encode the text value using this character encoding. Default is UTF-8.
 ```
@@ -353,8 +356,8 @@ seq off    len type
 #### `filter`
 This mode is for removing or modifying existing boxes.  You can either specify which
 boxes to keep (`--keep`), or which boxes to remove (`--drop`).  These options both accept
-a box specifier (see Box Specifiers below).  Either can be used multiple times in a
-command, but they can't be mixed.
+a box specifier (see [Box Specifiers](#box-specifiers) below).  Either can be used
+multiple times in a command, but they can't be mixed.
 
 Usage:
 
@@ -394,7 +397,7 @@ $ boxcutter.py filter --drop i=0..2 in.jxl > out.jxl
 
 # Remove the first three boxes and everything after the fourth box
 $ boxcutter.py filter --drop i=0..2 --drop i=4.. in.jxl > out.jxl
-# (This is just a confusing way to write `--drop i=3`.)
+# (This is just a confusing way to write `--keep i=3`.)
 ```
 
 #### Specifying boxes by type (`type`, `itype`)
