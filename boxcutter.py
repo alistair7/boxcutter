@@ -1087,8 +1087,9 @@ class BoxReader:
     if self._currentBoxDetail.length > 0: return self._currentBoxDetail.length
 
     while True:
-      did = self._seekBy(0x7FFFFFFF, exact=False)
-      if did < 0x7FFFFFFF:
+      # seek/_seekBy will go past EOF, so never finds the end.
+      block = self._read(IO_BLOCK_SIZE, allowShort=True)
+      if len(block) < IO_BLOCK_SIZE:
         self._currentBoxDetail.length = self._off - self._currentBoxDetail.offset
         return self._currentBoxDetail.length
 
