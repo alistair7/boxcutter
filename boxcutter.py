@@ -126,12 +126,23 @@ def main(argv):
 
   args = parser.parse_args(argv[1:])
 
-  if not HAVE_BROTLI and (args.decompress or \
-                          (args.compress is not None and args.compress != 'never') or \
-                          args.compress_select is not None):
-    sys.stderr.write("Compression/decompression options are unavailable because the " \
-                     "'brotli' package was not found.\n");
-    return 2
+  # Error on compression options if brotli unavailable
+  compressibleMode = args.mode in ('add','filter')
+  decompressibleMode = args.mode in ('extract','filter')
+  if compressibleMode:
+    if args.compress_select and args.compress is None:
+      args.compress = 'auto'
+    if not HAVE_BROTLI and args.compress is not None and args.compress != 'never':
+      sys.stderr.write("Compression/decompression options are unavailable because the " \
+                       "'brotli' package was not found.\n");
+      return 2
+  if decompressibleMode:
+    if args.decompress_select:
+      args.decompress = True
+    if not HAVE_BROTLI and args.decompress:
+      sys.stderr.write("Compression/decompression options are unavailable because the " \
+                       "'brotli' package was not found.\n");
+      return 2
 
   if args.mode == 'list':
     return doList(args.files)

@@ -486,7 +486,8 @@ Compression options:
                            boxes), and "never" is self-explanatory.
 --compress-select BOXSPEC  A box specifier restricting which boxes to consider for
                            compression. May be used multiple times. By default all boxes
-                           (other than critical JXL boxes) are considered.
+                           (other than critical JXL boxes) are considered. This option
+                           implies --compress=auto unless --compress is given explicitly.
 --brotli-effort N          Use effort N when compressing boxes, where N is in the range
                            0 (fastest) to 11 (slowest/smallest). The default is 11.
 --no-protect-jxl           Allow compression of critical JPEG XL boxes.  (No good can come
@@ -498,9 +499,10 @@ Decompression options:
 ```
 --decompress, -d                Decompress Brotli-compressed `brob` boxes.
 --no-decompress                 Do NOT decompress Brotli-compressed `brob` boxes.
---compress-select BOXSPEC       A box specifier restricting which boxes to decompress.
+--decompress-select BOXSPEC     A box specifier restricting which boxes to decompress.
                                 May be used multiple times. By default all `brob` boxes
-                                are considered for decompression.
+                                are considered for decompression.  This option implies
+                                --decompress.
 --decompress-max SIZE, -D SIZE  Abort the operation if any single box decompresses to more
                                 than SIZE bytes. The default is "1GB".  Use "-1" for no
                                 maximum.
