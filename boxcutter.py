@@ -28,6 +28,9 @@ JXL_CONTAINER_SIG = b'\0\0\0\x0cJXL \r\n\x87\n'
 # Boxes bigger than this require extended box size
 BIG_SIZE = 0xFFFFFFFF
 
+DEFAULT_BROTLI_EFFORT = 11
+DEFAULT_DECOMP_MAX = 1_000_000_000
+
 def main(argv):
   import argparse
   parser = argparse.ArgumentParser()
@@ -57,18 +60,43 @@ def main(argv):
   hasParser = subparsers.add_parser('has', parents=[countSelectParser],
                                     help='Check for existence of boxes.')
 
-  extractParser = subparsers.add_parser('extract', parents=[inOutParser],
-                                        help='Extract the payload of the first matching box.')
-  extractParser.add_argument('-s', '--select', metavar='BOXSPEC', action='append', help='Box specifier.  May be given multiple times.  The first box that matches any specifier is extracted.')
-  extractParser.add_argument('-d', '--decompress', action='store_true',
-                             help='Decompress `brob` boxes when extracting, outputting ' \
-                                  'the payload of the inner box.' \
+  compOptions = argparse.ArgumentParser(add_help=False)
+  compOptions.add_argument('--compress', '-c', metavar='WHEN', nargs='?',
+                           choices=['auto','always','never'],
+                           help='Compress boxes using Brotli, wrapping them in `brob` boxes.  "auto", the default method, only compresses the ones that look compressible.' \
+                                if HAVE_BROTLI else argparse.SUPPRESS)
+  compOptions.add_argument('--compress-select', metavar='BOXSPEC', action='append',
+                           help='Box specifier.  May be given multiple times.  Restricts the boxes considered for compression to those matching any of the specifiers.' \
+                                if HAVE_BROTLI else argparse.SUPPRESS)
+  compOptions.add_argument('--brotli-effort', type=int, default=11,
+                           help='Compression effort for Brotli, 0 (fastest) to 11 (slowest; default).' \
+                              if HAVE_BROTLI else argparse.SUPPRESS)
+  #compOptions.add_argument('--recompress', action='store_true',
+  #                         help='Consider `brob` boxes for decompression and recompression.' \
+  #                              if HAVE_BROTLI else argparse.SUPPRESS)
+  compOptions.add_argument('--no-protect-jxl', action='store_false', dest='protect_jxl',
+                           help='Allow compression of critical JPEG XL boxes.  (No good can come of this.)' \
+                                if HAVE_BROTLI else argparse.SUPPRESS)
+
+  decompOptions = argparse.ArgumentParser(add_help=False)
+  decompOptions.add_argument('-d', '--decompress', action='store_true',
+                             help='Decompress `brob` boxes.' \
                                   if HAVE_BROTLI else argparse.SUPPRESS)
-  extractParser.add_argument('-D', '--decompress-max', metavar='SIZE', default=None,
-                             help='Abort if the box decompresses to more than SIZE ' \
+  decompOptions.add_argument('--no-decompress', action='store_false', dest='decompress',
+                             help='Do not decompress `brob` boxes.  (This is the default when not using `extract` mode.)' \
+                                  if HAVE_BROTLI else argparse.SUPPRESS)
+  decompOptions.add_argument('--decompress-select', metavar='BOXSPEC', action='append',
+                           help='Box specifier.  May be given multiple times.  Restricts the boxes considered for decompression to those matching any of the specifiers.' \
+                                if HAVE_BROTLI else argparse.SUPPRESS)
+  decompOptions.add_argument('-D', '--decompress-max', metavar='SIZE', default=None,
+                             help='Abort if any box decompresses to more than SIZE ' \
                                   'bytes.  SI and IEC suffixes are allowed.  The ' \
                                   'default is 1GB.  Use -1 for no maximum.' \
                                   if HAVE_BROTLI else argparse.SUPPRESS)
+
+  extractParser = subparsers.add_parser('extract', parents=[inOutParser, decompOptions],
+                                        help='Extract the payload of the first matching box.')
+  extractParser.add_argument('-s', '--select', metavar='BOXSPEC', action='append', help='Box specifier.  May be given multiple times.  The first box that matches any specifier is extracted.')
 
   extractJxlParser = subparsers.add_parser('extract-jxl-codestream', parents=[inOutParser],
                                            help='Extract the raw JPEG XL codestream from a JXL container file.')
@@ -78,7 +106,8 @@ def main(argv):
   wrapJxlParser.add_argument('--level', '-l', type=int, metavar='N', help='Add a codestream level declaration to the file, for level N (adds a `jxll` box to the output).')
   wrapJxlParser.add_argument('--splits', '-s', metavar='OFFSET,OFFSET,...', help='Write several `jxlp` boxes instead of a single `jxlc` box, splitting the codestream at these byte offsets.')
 
-  addParser = subparsers.add_parser('add', parents=[inOutParser],
+
+  addParser = subparsers.add_parser('add', parents=[inOutParser, compOptions],
                                     help='Add one or more metadata boxes to the file.')
   addParser.add_argument('--at', default=-1, type=int, help='Position to insert the boxes.  Valid indexes range from 0 to the current box count.  Default is -1, which appends the new boxes.')
   addParser.add_argument('--box', action='append',
@@ -89,7 +118,7 @@ def main(argv):
                               '  Boxes are added in the order they are passed.')
   addParser.add_argument('--encoding', default='UTF-8', help='When setting box content from the command line (TYPE=...), encode the text value using this character encoding.  Default is UTF-8.')
 
-  filterParser = subparsers.add_parser('filter', parents=[inOutParser],
+  filterParser = subparsers.add_parser('filter', parents=[inOutParser, compOptions, decompOptions],
                                        help='Remove or modify boxes.')
   dropOrKeep = filterParser.add_mutually_exclusive_group()
   dropOrKeep.add_argument('--drop', metavar='BOXSPEC', action='append', help='Remove the specified box(es).')
@@ -97,33 +126,60 @@ def main(argv):
 
   args = parser.parse_args(argv[1:])
 
+  if not HAVE_BROTLI and (args.decompress or \
+                          (args.compress is not None and args.compress != 'never') or \
+                          args.compress_select is not None):
+    sys.stderr.write("Compression/decompression options are unavailable because the " \
+                     "'brotli' package was not found.\n");
+    return 2
+
   if args.mode == 'list':
     return doList(args.files)
-  elif args.mode == 'has' or args.mode == 'count':
+
+  if args.mode == 'has' or args.mode == 'count':
     if args.mode == 'count' and args.boxtype is not None:
       if args.select is None:
         args.select = []
       args.select.append(f'TYPE={args.boxtype}')
     return doCount(args.files, args.select, args.mode == 'has', verbose=args.verbose)
-  elif args.mode in ('extract', 'extract-jxl-codestream', 'wrap-jxl-codestream', 'add', 'filter'):
+
+  if args.mode in ('extract', 'extract-jxl-codestream', 'wrap-jxl-codestream', 'add', 'filter'):
     with openFileOrStdin(args.infile, 'rb') as infile, \
          openFileOrStdout(args.outfile, 'wb') as outfile:
       if args.mode == 'extract':
-        decompressMax = 0
-        if args.decompress:
-          decompressMax = 1_000_000_000 if args.decompress_max is None \
-                                        else decodeSize(args.decompress_max)
-        return doExtractBox(infile, outfile, args.select, decompressMax)
+        compOpts = CompressionOpts(decompressWhen = CompressionOpts.DECOMPRESS_ALWAYS if args.decompress else CompressionOpts.DECOMPRESS_NEVER,
+                                   decompressBoxes = boxspecStringsToBoxspecList(args.decompress_select),
+                                   decompressMax = decodeSize(args.decompress_max) if args.decompress_max else DEFAULT_DECOMP_MAX)
+        return doExtractBox(infile, outfile, args.select, compOpts)
       if args.mode == 'extract-jxl-codestream':
         return extractJxlCodestream(infile, outfile)
       if args.mode == 'wrap-jxl-codestream':
         splits = map(int, args.splits.split(',')) if args.splits else [] if args.splits is not None else None
         return addContainer(infile, outfile, jxll = args.level, splits=splits)
       if args.mode == 'add':
-        return doAddBoxes(infile, outfile, args.box, args.encoding, args.at)
+        compOpts = CompressionOpts(effort = args.brotli_effort if args.brotli_effort is not None else DEFAULT_BROTLI_EFFORT,
+                                   compressWhen = CompressionOpts.COMPRESS_AUTO if args.compress == 'auto' else \
+                                                  CompressionOpts.COMPRESS_ALWAYS if args.compress == 'always' else \
+                                                  CompressionOpts.COMPRESS_NEVER,
+                                   compressBoxes = boxspecStringsToBoxspecList(args.compress_select),
+                                   recompress = False,
+                                   protectJxl = args.protect_jxl)
+        return doAddBoxes(infile, outfile, args.box, args.encoding, compOpts, args.at)
       else: # mode == 'filter'
-        return doFilter(infile, outfile, args.keep is not None,
-                        args.keep if args.keep is not None else args.drop)
+        compOpts = CompressionOpts(effort = args.brotli_effort if args.brotli_effort is not None else DEFAULT_BROTLI_EFFORT,
+                                   compressWhen = CompressionOpts.COMPRESS_AUTO if args.compress == 'auto' else \
+                                                  CompressionOpts.COMPRESS_ALWAYS if args.compress == 'always' else \
+                                                  CompressionOpts.COMPRESS_NEVER,
+                                   compressBoxes = boxspecStringsToBoxspecList(args.compress_select),
+                                   recompress = False,
+                                   protectJxl = args.protect_jxl,
+                                   decompressWhen = CompressionOpts.DECOMPRESS_ALWAYS if args.decompress else CompressionOpts.DECOMPRESS_NEVER,
+                                   decompressBoxes = boxspecStringsToBoxspecList(args.decompress_select),
+                                   decompressMax = decodeSize(args.decompress_max) if args.decompress_max else DEFAULT_DECOMP_MAX)
+        return doFilter(infile, outfile,
+                        (args.keep is None and args.drop is None) or args.keep is not None,
+                        args.keep if args.keep is not None else args.drop,
+                        compOpts = compOpts)
 
   return 0
 
@@ -369,19 +425,19 @@ def extractJxlCodestream(src, dst):
   return 0 if (seenJxlc or nextJxlp != 0) else 1
 
 
-def doExtractBox(src, dst, boxspecStrings, decompressMax=0):
+def doExtractBox(src, dst, boxspecStrings, compOpts=None):
   if len(boxspecStrings) == 0:
     sys.stderr.write('You must specify which box to extract using --select.\n')
     return 2
-  if decompressMax != 0 and not HAVE_BROTLI:
-    sys.stderr.write('Cannot decompress boxes without the `brotli` package.')
+  compOpts = compOpts or CompressionOpts()
+  if compOpts.decompressWhen != CompressionOpts.DECOMPRESS_NEVER and not HAVE_BROTLI:
+    sys.stderr.write('Cannot decompress boxes without the `brotli` package.\n')
     return 2
-  retval = doScanBoxes(src, dst, MODE_EXTRACT_FIRST, boxspecStrings,
-                       decompressMax=decompressMax)
+  retval = doScanBoxes(src, dst, MODE_EXTRACT_FIRST, boxspecStrings, compOpts)
   if retval == DECOMP_TOO_BIG:
-    sys.stderr.write(f'Aborted because the box decompressed to over {decompressMax} ' \
-                     'bytes.  Try passing a larger value to --decompress-max (-1 for no' \
-                     ' limit).\n')
+    sys.stderr.write('Aborted because the box decompressed to over ' \
+                     f'{compOpts.decompressMax} bytes.  Try passing a larger value to ' \
+                     '--decompress-max (-1 for no limit).\n')
     return 2
   elif retval != 0:
     sys.stderr.write('Failed to extract any box.\n')
@@ -488,12 +544,13 @@ def addContainer(src, dst, jxll=None, splits=None):
   return 0
 
 
-def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
+def doAddBoxes(infile, outfile, newboxes, encoding, compOpts=None, at=-1):
   stdinCount = sum(map(lambda x : 1 if (x[4:] == '@-') else 0, newboxes)) + \
                (1 if infile == sys.stdin.buffer else 0)
   if stdinCount > 1:
     sys.stderr.write('Error: stdin can only be used once in a single command.\n')
     return 1
+  compOpts = compOpts or CompressionOpts()
 
   with BoxReader(infile) as reader:
 
@@ -504,7 +561,7 @@ def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
     for i,box in enumerate(reader):
       if i == at:
         # Insert the boxes here
-        if _writeBoxes(outfile, newboxes, encoding, atEnd=False) == -1:
+        if _writeBoxes(outfile, newboxes, encoding, compOpts, atEnd=False) == -1:
           return 1
         appendingBoxes = False
 
@@ -559,12 +616,13 @@ def doAddBoxes(infile, outfile, newboxes, encoding, at=-1):
       sys.stderr.write(f"Error: can't insert boxes at position {at}; box count is {i+1}.\n")
       return 1
 
-    if appendingBoxes and _writeBoxes(outfile, newboxes, encoding, atEnd=True) == -1:
+    if appendingBoxes and _writeBoxes(outfile, newboxes, encoding, compOpts, atEnd=True) == -1:
       return 1
   return 0
 
-def doFilter(src, dst, keep, boxspecStrings):
-  return doScanBoxes(src, dst, MODE_KEEP if keep else MODE_DROP, boxspecStrings)
+def doFilter(src, dst, keep, boxspecStrings, compOpts=None):
+  return doScanBoxes(src, dst, MODE_KEEP if keep else MODE_DROP, boxspecStrings,
+                     compOpts)
 
 MODE_KEEP = 0
 MODE_DROP = 1
@@ -593,14 +651,14 @@ def boxspecStringsToBoxspecList(boxspecStrings):
       boxspecs.append(BoxSpec(s))
   return boxspecs
 
-def doScanBoxes(src, dst, mode, boxspecStrings, decompressMax=0):
+def doScanBoxes(src, dst, mode, boxspecStrings, compOpts=None):
   """
   Wrapper for @ref doScanBoxes that translates boxspec strings into objects.
   """
-  return scanBoxes(src, dst, mode, boxspecStringsToBoxspecList(boxspecStrings),
-                   decompressMax)
+  compOpts = compOpts or CompressionOpts()
+  return scanBoxes(src, dst, mode, boxspecStringsToBoxspecList(boxspecStrings), compOpts)
 
-def scanBoxes(src, dst, mode, boxspecs, decompressMax=0):
+def scanBoxes(src, dst, mode, boxspecs, compOpts):
   """
   Copy all or parts of @p src to @p dst, depending on @p mode and @p boxspecs.
 
@@ -615,13 +673,12 @@ def scanBoxes(src, dst, mode, boxspecs, decompressMax=0):
               MODE_HAS is like MODE_COUNT, but stops after counting max 1 box.
 
   @param boxspecs List of BoxSpec objects determining which boxes are affected.
-  @param[in] decompressMax (Only for MODE_EXTRACT_FIRST) If 0, do not decompress `brob`
-                           boxes.  If > 0, decompress `brob` boxes but fail if any exceed
-                           this number of decompressed bytes.  If < 0, decompress `brob`
-                           boxes with no restriction on size.
+  @param compOpts CompressionOpts object specifying when to compress or decompress
+                  boxes.
 
   @return RAW_JXL if the input appears to be a raw codestream.
-  @return DECOMP_TOO_BIG if the decompressed data from a box exceeded @p decompressMax.
+  @return DECOMP_TOO_BIG if the decompressed data from a box exceeded
+          @p compOpts.decompressMax.
   @return FAILED_PARSE if the input couldn't be parsed for some other reason.
   If mode is @c MODE_KEEP, @c MODE_DROP, or @c MODE_EXTRACT_FIRST, @return 0 on success,
   else 1.
@@ -630,6 +687,7 @@ def scanBoxes(src, dst, mode, boxspecs, decompressMax=0):
   """
   seen = collections.defaultdict(lambda : 0)
   matchCount = 0 # Only updated for MODE_COUNT
+  writtenFinalBox = False
 
   try:
     with BoxReader(src) as reader:
@@ -653,35 +711,53 @@ def scanBoxes(src, dst, mode, boxspecs, decompressMax=0):
 
         if mode == MODE_EXTRACT_FIRST and matches:
           # We have either read nothing, or we've read the header + 4 bytes
-          if decompressMax != 0 and box.boxtype == b'brob':
-            # TODO: make use of max_output_size after brotli version 1.1.0.
-            decompSize = 0
-            decompressor = brotli.Decompressor()
-            while True:
-              compBlock = reader.readCurrentBox(IO_BLOCK_SIZE)
-              if len(compBlock) == 0: break
-              decompBlock = decompressor.process(compBlock)
-              decompSize += len(decompBlock) 
-              if decompressMax > 0 and decompSize > decompressMax:
-                return DECOMP_TOO_BIG
-              dst.write(decompBlock)
-            while not decompressor.is_finished():
-              decompBlock = decompressor.process(b'')
-              decompSize += len(decompBlock) 
-              if decompressMax > 0 and decompSize > decompressMax:
-                return DECOMP_TOO_BIG
-              dst.write(decompBlock)
+          if compOpts.decompressWhen != CompressionOpts.DECOMPRESS_NEVER and \
+             box.boxtype == b'brob':
+            _copyAndDecompress(dst, reader, compOpts.decompressMax)
+          elif len(boxStart) > 0:
+            dst.write(boxStart[-4:])
+            reader.copyCurrentBox(dst)
           else:
-            if len(boxStart) > 0:
-              dst.write(boxStart[-4:])
-              reader.copyCurrentBox(dst)
-            else:
-              reader.copyCurrentBoxPayload(dst)
+            reader.copyCurrentBoxPayload(dst)
           return 0
 
         elif (mode == MODE_KEEP and matches) or (mode == MODE_DROP and not matches):
-          dst.write(boxStart)
-          reader.copyCurrentBox(dst)
+
+          if writtenFinalBox:
+            # We've already written a 0-length box and we can't go back and correct it.
+            raise UnseekableOutputError('This operation requires the output file to be seekable.')
+
+          # Copy this box to the output - do we need to compress or decompress it?
+          compAction = compOpts.getAction(i, box, innerType, seen[innerType]) \
+                       if compOpts is not None else CompressionOpts.COMPRESS_NEVER
+          if compAction == CompressionOpts.COMPRESS_NEVER:
+            dst.write(boxStart)
+            reader.copyCurrentBox(dst)
+
+          else:
+            if compAction == CompressionOpts.DECOMPRESS_ALWAYS:
+              newBoxSize = writeBoxHeader(dst, innerType, payloadSize=0) + \
+                           _copyAndDecompress(dst, reader, compOpts.decompressMax)
+
+            else:
+              if box.boxtype == b'brob':
+                raise NotImplementedError('Recompressing compressed boxes not implemented yet.')
+              newBoxSize = writeBoxHeader(dst, b'brob', payloadSize=0) + \
+                           dst.write(box.boxtype) + \
+                           _copyAndCompress(dst, reader, compOpts.effort)
+
+            # Compressing or decompressing, we can't set the box size up front.
+            # TODO: handle sizes > BIG_SIZE for non-seekable output
+            if dst.seekable() and newBoxSize <= BIG_SIZE:
+              # Go back and write the size header
+              endPos = dst.tell()
+              dst.seek(-newBoxSize, io.SEEK_CUR)
+              dst.write(struct.pack('>I', newBoxSize))
+              dst.seek(endPos)
+            else:
+              # Can't go back and change the size header from 0, so *hopefully* there are
+              # no more boxes to write. This flag makes sure we fail before writing another.
+              writtenFinalBox = True
 
         elif mode in (MODE_COUNT, MODE_HAS) and matches:
           if mode == MODE_HAS: return 1
@@ -698,14 +774,73 @@ def scanBoxes(src, dst, mode, boxspecs, decompressMax=0):
          matchCount if mode == MODE_COUNT else \
          0
 
+def _copyAndDecompress(dst, reader, decompressMax):
+  """
+  Read Brotli-compressed bytes from the current box of @p reader (stream position should
+  be 4-bytes past the header, i.e. after the inner box 4cc), and write the decompressed
+  result to @p dst.
 
-def _writeBoxes(outfile, boxes, encoding, atEnd):
+  # TODO: it would be useful if this could detect whether the entire output fits into a
+  # single IO_BLOCK_SIZE, and if so, hold off on writing it out, to give the caller a
+  # chance to set the size field correctly on non-seekable outputs.
+
+  @return The number of bytes written to @p dst.
+  Raises TooMuchDataError if @p decompressMax > 0 and we're about to write more than this.
+  """
+  wrote = 0
+  decompressor = brotli.Decompressor()
+  while True:
+    compBlock = reader.readCurrentBox(IO_BLOCK_SIZE)
+    if len(compBlock) == 0: break
+    # TODO: make use of max_output_size after brotli version 1.1.0.
+    decompBlock = decompressor.process(compBlock)
+    wrote += len(decompBlock)
+    if decompressMax > 0 and wrote > decompressMax:
+      raise TooMuchDataError(f"Decompressed size exceeds the limit of {decompressMax} ' \
+                             'bytes")
+    dst.write(decompBlock)
+  while not decompressor.is_finished():
+    decompBlock = decompressor.process(b'')
+    wrote += len(decompBlock)
+    if decompressMax > 0 and wrote > decompressMax:
+      raise TooMuchDataError(f"Decompressed size exceeds the limit of {decompressMax} ' \
+                             'bytes")
+    if len(decompBlock) == 0:
+      raise BoxCutterException('Brotli decompression failed.')
+    dst.write(decompBlock)
+  return wrote
+
+def _copyAndCompress(dst, reader, effort):
+  """
+  Read plain bytes from the current box of @p reader (stream position should be at the
+  start of the payload) and write the compressed result to @p dst.
+
+  # TODO: it would be useful if this could detect whether the entire output fits into a
+  # single IO_BLOCK_SIZE, and if so, hold off on writing it out, to give the caller a
+  # chance to set the size field correctly on non-seekable outputs.
+
+  @return The number of bytes written to @p dst.
+  """
+  wrote = 0
+  compressor = brotli.Compressor(quality=effort)
+  while True:
+    plainBlock = reader.readCurrentBox(IO_BLOCK_SIZE)
+    if len(plainBlock) == 0: break
+    compBlock = compressor.process(plainBlock)
+    wrote += dst.write(compBlock)
+  compBlock = compressor.finish()
+  wrote += dst.write(compBlock)
+  return wrote
+
+def _writeBoxes(outfile, boxes, encoding, compOpts, atEnd):
   """
   Write boxes at the current position.
 
   @param outfile Open binary file.
   @param boxes List of box descriptor strings.
   @param encoding Character encoding to use if box content is directly specified as text.
+  @param compOpts Compression options for the written boxes (decompression settings are
+                  ignored.)
   @param atEnd Should be True if these boxes are going to be at the end of the file, which
                gives us the option of not specifying the size of the last box.
   @return The number of bytes written, or -1 on error.
@@ -720,37 +855,79 @@ def _writeBoxes(outfile, boxes, encoding, atEnd):
       sys.stderr.write(f'Invalid box specifier: {shlex.quote(newBox)}.\n')
       return -1
 
+    compAction = CompressionOpts.COMPRESS_NEVER
+    if compOpts is not None and compOpts.compressWhen != CompressionOpts.COMPRESS_NEVER:
+      # Dummy box details - only the type has any effect
+      boxDetails = BoxDetails(-1, 0, newTypeBytes)
+      compAction = compOpts.getAction(-1, boxDetails, None, -1)
+
+    # Handle string literal box content
     if newMethod == '=':
       data = newDataSource.encode(encoding)
+      if compAction != CompressionOpts.COMPRESS_NEVER:
+        compressor = brotli.Compressor(quality=compOpts.effort, mode=brotli.MODE_TEXT)
+        compData = compressor.process(data)
+        compData += compressor.finish()
+        if len(compData) + 4 < len(data) or compAction == CompressionOpts.COMPRESS_ALWAYS:
+          wrote += writeBoxHeader(outfile, b'brob', len(compData) + 4) + \
+                   outfile.write(newTypeBytes) + \
+                   outfile.write(compData)
+          continue
+
+      # Copy the box without compressing
       wrote += writeBoxHeader(outfile, newTypeBytes, len(data)) + \
                outfile.write(data)
       continue
 
+    # Handle file box content
     with openFileOrStdin(newDataSource, 'rb') as inbox:
-      dataSize = streamSize(inbox)
 
+      # Check whether we know the box size in advance.
+      # If not, try to bookmark the size field so we can set it later.
+      dataSize = streamSize(inbox) if compAction == CompressionOpts.COMPRESS_NEVER else -1
+      isLastBox = atEnd and boxi == len(boxes) - 1
       if dataSize == -1:
-        if (not atEnd or boxi != len(boxes)-1) and not outfile.seekable():
-          sys.stderr.write("Error: output isn't seekable, and the box size can't be "
-                           "determined in advance.\n")
-          return -1
+        if not isLastBox and not outfile.seekable():
+          raise UnseekableOutputError("Output isn't seekable, and the box size can't " \
+                                      "be determined in advance.")
         if outfile.seekable():
           # Bookmark the size field so we can come back and update it later
           outBoxOffset = outfile.tell()
 
+      # Copy with compression
+      if compAction != CompressionOpts.COMPRESS_NEVER:
+        # TODO: should pre-check first block compression rate if COMPRESS_AUTO
+        wrote += writeBoxHeader(outfile, b'brob', 0) + outfile.write(newTypeBytes) + \
+                 copyAndCompressData(inbox, outfile, compOpts.effort, brotli.MODE_GENERIC)
+        boxEnd = outfile.tell()
+        if outfile.seekable():
+          outfile.seek(outBoxOffset)
+          newBoxSize = boxEnd - outBoxOffset
+          if newBoxSize > BIG_SIZE and not isLastBox:
+            # TODO: Handle big boxes
+            sys.stderr.write(f'Adding boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.\n')
+            return 1
+          if newBoxSize <= BIG_SIZE:
+            outfile.write(struct.pack('>I', newBoxSize))
+            outfile.seek(boxEnd)
+        continue
+
+      # Copy without compression
       wrote += writeBoxHeader(outfile, newTypeBytes, dataSize) + \
                copyData(inbox, outfile, dataSize)
 
+      # Copy without compression
       if dataSize == -1 and outfile.seekable():
         boxEnd = outfile.tell()
         outfile.seek(outBoxOffset)
         newBoxSize = boxEnd - outBoxOffset
-        if newBoxSize > BIG_SIZE:
+        if newBoxSize > BIG_SIZE and not isLastBox:
           # TODO: Handle big boxes
           sys.stderr.write(f'Adding boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.\n')
           return 1
-        outfile.write(struct.pack('>I', newBoxSize))
-        outfile.seek(boxEnd)
+        if newBoxSize <= BIG_SIZE:
+          outfile.write(struct.pack('>I', newBoxSize))
+          outfile.seek(boxEnd)
   return wrote
 
 
@@ -829,6 +1006,34 @@ def copyData(src, dst, count = -1):
       return done
     dst.write(block)
     done += len(block)
+  return done
+
+def copyAndCompressData(src, dst, effort, mode, count = -1):
+  """
+  Copy @p count bytes from @p src to @p dst, compressing with brotli.
+
+  @param[in,out] src Open file to read bytes from.
+  @param[in,out] dst Open file to write bytes to.
+  @param[in] count Number of bytes to read from @p src.  If -1, bytes are read until
+                   EOF on @p src.
+  @return The number of bytes written to @p dst.
+  """
+  done = 0
+  if count is None: count = -1
+
+  compressor = brotli.Compressor(quality=effort, mode=mode)
+
+  while count < 0 or done < count:
+    want = min(IO_BLOCK_SIZE, count-done) if count >= 0 else IO_BLOCK_SIZE
+    block = src.read(want)
+    if len(block) == 0:
+      if count >= 0:
+        raise IOError(f"copyAndCompressData: tried to copy {count} bytes but actually did {done}")
+      break
+    compBlock = compressor.process(block)
+    done += dst.write(compBlock)
+  compBlock = compressor.finish()
+  done += dst.write(compBlock)
   return done
 
 
@@ -921,6 +1126,14 @@ class UsageError(BoxCutterException):
 
 class InvalidBoxSpec(BoxCutterException):
   """Invalid specifier passed to filter function."""
+  pass
+
+class UnseekableOutputError(BoxCutterException):
+  """Operation requires seeking the output file, but we can't."""
+  pass
+
+class TooMuchDataError(BoxCutterException):
+  """Operation produced more output than allowed."""
   pass
 
 class BoxDetails:
@@ -1414,6 +1627,118 @@ class CatReader:
   def writable(self): return False
   def fileno(self): raise OSError('CatReader does not have a fileno.')
 
+class CompressionOpts:
+  """
+  An instance of CompressionOpts defines criteria for deciding whether a box should be
+  compressed or decompressed, and what compression options to use.
+  """
+  COMPRESS_NEVER = 1  # Don't compress
+  COMPRESS_AUTO = 2   # Compress if we think it's sensible
+  COMPRESS_ALWAYS = 3 # Always compress (but `protectJxl` still overrides this)
+
+  DECOMPRESS_NEVER = 100  # Don't decompress
+  DECOMPRESS_ALWAYS = 101 # Always decompress
+
+  __slots__ = ['effort','compressWhen','compressBoxes', 'recompress','decompressWhen',
+               'decompressBoxes','decompressMax','protectJxl']
+
+  def __init__(self, effort=DEFAULT_BROTLI_EFFORT,
+               compressWhen=COMPRESS_NEVER,
+               compressBoxes=None,
+               recompress=False,
+               decompressWhen=DECOMPRESS_NEVER,
+               decompressBoxes=None,
+               decompressMax=-1,
+               protectJxl=True):
+    """
+    Initialise compression/decompression options.
+
+    @param effort Brotli compression effort, int in 0..11.
+    @param compressWhen One of the COMPRESS_* constants.
+    @param compressBoxes List of BoxSpec objects to restrict which boxes are considered
+                         for compression, or None for no filter.
+    @param recompress True if existing `brob` boxes should be recompressed.
+    @param decompressWhen One of the DECOMPRESS_* constants.
+    @param decompressBoxes List of BoxSpec objects to restrict which boxes are considered
+                           for decompression, or None for no filter.
+    @param decompressMax Maximum number of bytes the client wants to decompress from a
+                         single box (for information only - client has to enforce this).
+    @param protectJxl If True, boxes that form part of the JPEG XL container spec are
+                      never compressed.
+    """
+    self.effort = effort
+    self.compressWhen = compressWhen
+    self.compressBoxes = compressBoxes
+    self.recompress = recompress
+    self.decompressWhen = decompressWhen
+    self.decompressBoxes = decompressBoxes
+    self.decompressMax = decompressMax
+    self.protectJxl = protectJxl
+
+  def __repr__(self):
+    args = []
+    if self.effort != DEFAULT_BROTLI_EFFORT:
+      args.append(f'effort={self.effort}')
+    if self.compressWhen != CompressionOpts.COMPRESS_NEVER:
+      args.append(f'compressWhen={self.compressWhen}')
+    if self.compressBoxes is not None:
+      args.append(f'compressBoxes={repr(self.compressBoxes)}')
+    if self.recompress:
+      args.append('recompress=True')
+    if self.decompressWhen != CompressionOpts.DECOMPRESS_NEVER:
+      args.append(f'decompressWhen={self.decompressWhen}')
+    if self.decompressBoxes is not None:
+      args.append(f'decompressBoxes={repr(self.decompressBoxes)}')
+    if self.decompressMax != -1:
+      args.append(f'decompressMax={self.decompressMax}')
+    if not self.protectJxl:
+      args.append('protectJxl=False')
+    return f'CompressionOpts({", ".join(args)})'
+
+  def _isProtectedType(boxtype):
+    return boxtype.lower().startswith(b'jxl') or boxtype in (b'ftyp',b'jbrd')
+
+  def getAction(self, i : int, box : BoxDetails, innerType, instance : int):
+    """
+    Check whether a box should be compressed, decompressed, or left alone
+
+    If the box matches the criteria for compressing AND decompressing, compression takes
+    priority.
+
+    @param[in] i Position index of the box.
+    @param[in] box Properties of the current box.
+    @param[in] innerType The decompressed type of the box, or None if not applicable.
+    @param[in] instance Occurance index of the box (per box type).
+
+    @return COMPRESS_ALWAYS - compress this box (decompressing it first if it's a `brob`),
+                              using effort self.effort.
+    @return COMPRESS_AUTO - as above, but skip compression if the data doesn't seem
+                            compressible.
+    @return DECOMPRESS_ALWAYS - decompress this box.
+    @return COMPRESS_NEVER - Leave this box alone
+    """
+    if self.compressWhen != CompressionOpts.COMPRESS_NEVER \
+       and \
+       ( (not self.protectJxl and \
+          self.compressWhen != CompressionOpts.COMPRESS_AUTO) or \
+          not CompressionOpts._isProtectedType(box.boxtype) ) \
+       and \
+       (self.recompress or box.boxtype != b'brob'):
+      matches = self.compressBoxes is None or \
+                any(map(lambda x : x.matches(i, box, innerType, instance), \
+                        self.compressBoxes))
+      if matches:
+        return self.compressWhen
+
+    if self.decompressWhen != CompressionOpts.DECOMPRESS_NEVER and \
+       box.boxtype == b'brob':
+      matches = self.decompressBoxes is None or \
+                any(map(lambda x : x.matches(i, box, innerType, instance), \
+                        self.decompressBoxes))
+      if matches:
+        return CompressionOpts.DECOMPRESS_ALWAYS
+
+    return CompressionOpts.COMPRESS_NEVER
 
 
 if __name__ == '__main__':

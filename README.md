@@ -15,6 +15,7 @@ conform to ISO/IEC 14496-12.  e.g., MP4, HEIF (HEIC, AVIF), JPEG2000.
 - Remove specified boxes ([`filter`](#filter)).
 - Export boxes - as full boxes including headers ([`filter`](#filter)), or just the payload
   ([`extract`](#extract)).
+- Apply/remove Brotli (`brob`) compression to/from box content.
 
 The *content* of boxes is treated as opaque data, with some very limited exceptions.
 
@@ -133,29 +134,15 @@ specifiers is chosen, and its payload is written to the output.
 Usage:
 
 ```
-boxcutter.py extract [-s BOXSPEC] [-d] [-D SIZE] [infile] [outfile]
+boxcutter.py extract [-s BOXSPEC] [--decompress] [--decompress-select]
+                     [--decompress-max SIZE] [infile] [outfile]
 
 options:
   -s BOXSPEC, --select BOXSPEC
                         Box specifier. May be given multiple times. The first box that matches any specifier is extracted.
-  -d, --decompress      Decompress `brob` boxes when extracting, outputting the payload of the inner box.
-  -D SIZE, --decompress-max SIZE
-                        Abort if the box decompresses to more than SIZE bytes. SI and IEC suffixes are allowed. The default is 1GB. Use -1 for no maximum.
 ```
 
-The `--decompress` options are only available if the `brotli` package is installed.
-
-***DoS Warning***
-The Python API for the latest release of `brotli` at the time of writing (v1.1.0) doesn't
-allow callers to limit the length of decompressed data produced from a given chunk
-of compressed input, so it may be possible for a malicious file to cause arbitrarily large
-memory allocations.  This has been addressed in the development version of `brotli`, but
-as yet it's unreleased.  Decompress untrusted boxes at your own risk.
-
-The SIZE argument to `--decompress-max` understands SI (k, M, G, T) and IEC (Ki, Mi, Gi,
-Ti) suffixes.  The suffix is not case sensitive, and in all cases a trailing 'b' is
-allowed and ignored.  This protects against excessive disk usage, but not excessive memory
-usage inside brotli.
+See also: [Brotli compression / decompression options](#brotli-compression-decompression-options).
 
 Example:
 
@@ -274,14 +261,21 @@ The argument to `--box` is a string in one of two formats:
 Usage:
 
 ```
-boxcutter.py add [--at AT] [--box BOX] [--encoding ENCODING] [infile] [outfile]
+boxcutter.py add [--at AT] [--box BOX] [--encoding ENCODING] [--compress WHEN]
+                 [--compress-select BOXSPEC] [--brotli-effort N] [infile] [outfile]
 
 options:
-  --at AT              Position to insert the boxes. Valid indexes range from 0 to the current box count. Default is -1, which appends the new boxes.
-  --box BOX            Box description in the format "TYPE=DATA" (to create a box of type TYPE with content DATA) or "TYPE@FILE" (to set the box content from a file named FILE. FILE may be '-' to read box content from stdin. Boxes are added in the order they are
-                       passed.
-  --encoding ENCODING  When setting box content from the command line (TYPE=...), encode the text value using this character encoding. Default is UTF-8.
+  --at AT              Position to insert the boxes. Valid indexes range from 0 to the
+                       current box count. Default is -1, which appends the new boxes.
+  --box BOX            Box description in the format "TYPE=DATA" (to create a box of type
+                       TYPE with content DATA) or "TYPE@FILE" (to set the box content from
+                       a file named FILE. FILE may be '-' to read box content from stdin.
+                       Boxes are added in the order they are passed.
+  --encoding ENCODING  When setting box content from the command line (TYPE=...), encode
+                       the text value using this character encoding. Default is UTF-8.
 ```
+
+See also: [Brotli compression / decompression options](#brotli-compression-decompression-options).
 
 Example:
 
@@ -358,16 +352,24 @@ This mode is for removing or modifying existing boxes.  You can either specify w
 boxes to keep (`--keep`), or which boxes to remove (`--drop`).  These options both accept
 a box specifier (see [Box Specifiers](#box-specifiers) below).  Either can be used
 multiple times in a command, but they can't be mixed.
+If you use neither `--keep` nor `--drop`, boxcutter
+operates in "passthrough" mode, copying all boxes to the output (possibly
+compressing/decompressing them on the way).
 
 Usage:
 
 ```
-boxcutter.py filter [--drop BOXSPEC | --keep BOXSPEC] [infile] [outfile]
+boxcutter.py filter [--drop BOXSPEC | --keep BOXSPEC] [--compress WHEN]
+                    [--compress-select BOXSPEC] [--brotli-effort N] [--no-protect-jxl]
+                    [--decompress] [--decompress-select BOXSPEC] [--decompress-max SIZE]
+                    [infile] [outfile]
 
 options:
   --drop BOXSPEC  Remove the specified box(es).
   --keep BOXSPEC  Keep only the specified box(es).
 ```
+
+See also: [Brotli compression / decompression options](#brotli-compression-decompression-options).
 
 Other than printing warnings in certain cases, `filter` mode makes no attempt to stop you
 creating invalid JPEG XL files, which is easy to do by removing critical boxes.
@@ -399,6 +401,9 @@ $ boxcutter.py filter --drop i=0..2 in.jxl > out.jxl
 $ boxcutter.py filter --drop i=0..2 --drop i=4.. in.jxl > out.jxl
 # (This is just a confusing way to write `--keep i=3`.)
 ```
+
+Operations that add or remove boxes may change the index of existing boxes.  `i` always
+refers to a box's position in the *input* file.
 
 #### Specifying boxes by type (`type`, `itype`)
 Specific box types can be selected using the `type` property (and its variations):
@@ -467,7 +472,65 @@ fi
 boxcutter.py filter --keep="$boxspec" in.jxl out.jxl
 ```
 
-### Implicit box size problems
+#### Brotli compression / decompression options
+If the `brotli` package is available, several modes support the following compression
+and decompression options that affect the output of boxcutter:
+
+Compression options:
+
+```
+--compress WHEN, -c WHEN   Compress box content "always", "never" or "auto", defaulting to
+                           "never".  "auto" means boxcutter will decide whether to compress
+                           each box depending on whether it thinks it's compressible.
+                           "always" tries to compress every box (except for critical JXL
+                           boxes), and "never" is self-explanatory.
+--compress-select BOXSPEC  A box specifier restricting which boxes to consider for
+                           compression. May be used multiple times. By default all boxes
+                           (other than critical JXL boxes) are considered.
+--brotli-effort N          Use effort N when compressing boxes, where N is in the range
+                           0 (fastest) to 11 (slowest/smallest). The default is 11.
+--no-protect-jxl           Allow compression of critical JPEG XL boxes.  (No good can come
+                           of this.)
+```
+
+Decompression options:
+
+```
+--decompress, -d                Decompress Brotli-compressed `brob` boxes.
+--no-decompress                 Do NOT decompress Brotli-compressed `brob` boxes.
+--compress-select BOXSPEC       A box specifier restricting which boxes to decompress.
+                                May be used multiple times. By default all `brob` boxes
+                                are considered for decompression.
+--decompress-max SIZE, -D SIZE  Abort the operation if any single box decompresses to more
+                                than SIZE bytes. The default is "1GB".  Use "-1" for no
+                                maximum.
+```
+
+Compression causes the box content to be wrapped in a `brob` box, and decompression
+unwraps it.  A box that's already a `brob` type will never be recompressed.
+
+`filter` mode supports all compression and decompression options.
+
+`extract` mode supports only the decompression options.  Unlike other modes, it will
+decompress by default.  Use `--no-decompress` to suppress this.
+
+`add` mode supports only the compression options.  Note that only the newly-added boxes
+are considered for compression.
+
+The SIZE argument to `--decompress-max` understands SI (k, M, G, T) and IEC (Ki, Mi, Gi,
+Ti) suffixes.  The suffix is not case sensitive, and in all cases a trailing 'b' is
+allowed and ignored.  This protects against excessive disk usage, but not excessive memory
+usage inside brotli.
+
+***DoS Warning***
+The Python API for the latest release of `brotli` at the time of writing (v1.1.0) doesn't
+allow callers to limit the length of decompressed data produced from a given chunk
+of compressed input, so it may be possible for a malicious file to cause arbitrarily large
+memory allocations.  This has been addressed in the development version of `brotli`, but
+as yet it's unreleased.  Decompress untrusted boxes at your own risk.
+
+
+### Streaming box size problems
 The header of the last box in a file can have its size field set to 0, which means the
 box extends to the end of the file, so the size is implicit.  In most cases this is fine,
 but it makes certain operations difficult when both the input and output files aren't
@@ -479,3 +542,6 @@ out its size, we either need to examine the input file size to see how many byte
 left, or write a placeholder for the size and seek back to correct it after writing the
 rest of the box.  (Or buffer the whole box in memory, but boxcutter never does that.)  If
 neither of those is possible, boxcutter will exit with an error.
+
+A similar issue exists when compressing or decompressing boxes, as we need to write the
+header before we know how big the resulting box will be.

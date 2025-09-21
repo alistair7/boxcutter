@@ -175,10 +175,13 @@ class TestExtractBox(unittest.TestCase):
     if not boxcutter.HAVE_BROTLI:
       return
 
+    compOpts = boxcutter.CompressionOpts(
+                 decompressWhen=boxcutter.CompressionOpts.DECOMPRESS_ALWAYS,
+                 decompressMax=-1)
+
     with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
          io.BytesIO() as dst:
-      self.assertEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'], decompressMax=-1),
-                       0)
+      self.assertEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'], compOpts), 0)
       decompressedExif = dst.getvalue()
       self.assertEqual(decompressedExif[:8], b'\0\0\0\0II*\0')
       self.assertEqual(len(decompressedExif), 264)
@@ -186,24 +189,25 @@ class TestExtractBox(unittest.TestCase):
       dst.seek(0)
       dst.truncate()
       src.seek(0)
-      self.assertEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'], decompressMax=264),
-                       0)
+      compOpts.decompressMax = 264
+      self.assertEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'], compOpts), 0)
       self.assertEqual(len(dst.getvalue()), 264)
 
       dst.seek(0)
       dst.truncate()
       src.seek(0)
-      self.assertNotEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'],
-                          decompressMax=263), 0)
+      compOpts.decompressMax = 263
+      self.assertRaises(boxcutter.TooMuchDataError, boxcutter.doExtractBox, src, dst,
+                        ['TYPE=brob'], compOpts)
       self.assertTrue(len(dst.getvalue()) <= 263)
 
       dst.seek(0)
       dst.truncate()
       src.seek(0)
+      compOpts.decompressMax = -1
       try:
         boxcutter.HAVE_BROTLI = False
-        self.assertNotEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'],
-                                                   decompressMax=-1), 0)
+        self.assertNotEqual(boxcutter.doExtractBox(src, dst, ['TYPE=brob'], compOpts), 0)
       finally:
         boxcutter.HAVE_BROTLI = True
 
@@ -411,7 +415,64 @@ class TestAdd(unittest.TestCase):
   def testAddNonAscii(self):
     with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src, \
          io.BytesIO() as dst:
-      self.assertNotEqual(boxcutter.doAddBoxes(src, dst, ['ab\tc='], 'utf-8'), 0)
+      self.assertNotEqual(boxcutter.doAddBoxes(src, dst, ['ab\tc='], 'utf-8',
+                                               compOpts=None), 0)
+
+class TestAddWithCompression(unittest.TestCase):
+
+  @unittest.skipIf(not boxcutter.HAVE_BROTLI, 'Brotli not supported')
+  def testAddToEmpty(self):
+    for position in (-1, 0):
+      with io.BytesIO() as empty, \
+           io.BytesIO() as result:
+          self.assertEqual(boxcutter.doAddBoxes(empty, result,
+                                                ['utf8=café','empt=',f'ABOX@{TESTFILES}/a'],
+                                                'utf-8',
+                                                compOpts=boxcutter.CompressionOpts(compressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS),
+                                                at=position), 0,
+                           msg=f'Position {position}')
+          result.seek(0)
+          (boxLen,) = struct.unpack('>I', result.read(4))
+          self.assertEqual(result.read(8), b'brobutf8')
+          result.seek(boxLen - 4 - 8, io.SEEK_CUR)
+          (boxLen,) = struct.unpack('>I', result.read(4))
+          self.assertEqual(result.read(8), b'brobempt')
+          result.seek(boxLen - 4 - 8, io.SEEK_CUR)
+          (boxLen,) = struct.unpack('>I', result.read(4))
+          self.assertEqual(result.read(8), b'brobABOX')
+          # Since BytesIO is seekable, we SHOULD have set the last size field
+          self.assertNotEqual(boxLen, 0)
+
+  @unittest.skipIf(not boxcutter.HAVE_BROTLI, 'Brotli not supported')
+  def testNonSeekable(self):
+    with open(f'{TESTFILES}/various-boxes.4cc', 'rb') as src:
+
+      # When setting boxes using string literals, we always buffer the whole thing, so
+      # we can add any number of boxes anywhere without seeking the output.
+      for position in (-1, 0):
+        src.seek(0)
+        with io.BytesIO() as dst:
+          dst.seekable = lambda : False
+          self.assertEqual(boxcutter.doAddBoxes(src, dst, ['utf8=café','empt='], 'utf-8',
+                                                compOpts=boxcutter.CompressionOpts(compressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS)),
+                           0, msg=f'Position {position}')
+
+      # When reading box content from files and compressing, we don't know the size
+      # before writing the box, so we can only append, and only once.
+      for position in (-1, 0):
+        src.seek(0)
+        with io.BytesIO() as dst:
+          dst.seekable = lambda : False
+          self.assertEqual(boxcutter.doAddBoxes(src, dst, ['utf8=café',f'ABOX@{TESTFILES}/a'], 'utf-8',
+                                                compOpts=boxcutter.CompressionOpts(compressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS)),
+                           0, msg=f'Position {position}')
+      for position in (-1, 0):
+        src.seek(0)
+        with io.BytesIO() as dst:
+          dst.seekable = lambda : False
+          with self.assertRaises(boxcutter.UnseekableOutputError, msg=f'Position {position}'):
+            boxcutter.doAddBoxes(src, dst, [f'ABOX@{TESTFILES}/a','utf8=café'], 'utf-8',
+                                 compOpts=boxcutter.CompressionOpts(compressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS))
 
 class TestFilter(unittest.TestCase):
 
@@ -536,6 +597,208 @@ class TestFilter(unittest.TestCase):
       self.assertEqual(boxcutter.doFilter(src, dst, False, ['type=jxlp','i=0..0']), 0)
       self.assertEqual(dst.getvalue(), b'\0\0\0\x14ftypjxl \0\0\0\0jxl ')
 
+class TestFilterWithCompression(unittest.TestCase):
+
+  @unittest.skipIf(not boxcutter.HAVE_BROTLI, 'Brotli not supported')
+  def testRemoveAndCompressProtectJxl(self):
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      compOpts = boxcutter.CompressionOpts(compressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS)
+      self.assertEqual(boxcutter.doFilter(src, dst, False, ['type=jxlp'], compOpts), 0)
+      dst.seek(0)
+      self.assertEqual(dst.read(12), boxcutter.JXL_CONTAINER_SIG)
+      self.assertEqual(dst.read(8), b'\0\0\0\x14ftyp')
+      dst.seek(12, io.SEEK_CUR)
+      self.assertEqual(dst.read(8), b'\0\0\0\xc8jbrd')
+      dst.seek(192, io.SEEK_CUR)
+      self.assertEqual(dst.read(12), b'\0\0\0\xaabrobExif')
+      dst.seek(158, io.SEEK_CUR)
+      self.assertEqual(dst.read(12), b'\0\0\x02\xdcbrobxml ')
+      dst.seek(720, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobxtra')
+
+  @unittest.skipIf(not boxcutter.HAVE_BROTLI, 'Brotli not supported')
+  def testRemoveAndCompressNoProtectJxl(self):
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      compOpts = boxcutter.CompressionOpts(compressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS,
+                                           protectJxl=False)
+      self.assertEqual(boxcutter.doFilter(src, dst, False, ['type=jxlp'], compOpts), 0)
+      dst.seek(0)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobJXL ')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobftyp')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobjbrd')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobExif')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobxml ')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobxtra')
+
+  @unittest.skipIf(not boxcutter.HAVE_BROTLI, 'Brotli not supported')
+  def testPassthroughCompressSpecific(self):
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      compOpts = boxcutter.CompressionOpts(compressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS,
+                 compressBoxes=boxcutter.boxspecStringsToBoxspecList(['type=Exif','i=6']),
+                 protectJxl=False)
+      self.assertEqual(boxcutter.doFilter(src, dst, True, None, compOpts), 0)
+      dst.seek(0)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'JXL ')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'ftyp')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'jxlp')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'jbrd')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobExif')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobxml ')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobjxlp')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'xtra')
+
+
+class TestFilterWithDecompression(unittest.TestCase):
+
+  @unittest.skipIf(not boxcutter.HAVE_BROTLI, 'Brotli not supported')
+  def testRemoveAndDecompress(self):
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      compOpts = boxcutter.CompressionOpts(decompressWhen=boxcutter.CompressionOpts.DECOMPRESS_ALWAYS)
+      self.assertEqual(boxcutter.doFilter(src, dst, False, ['type=Exif'], compOpts), 0)
+      dst.seek(0)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'JXL ')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'ftyp')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'jxlp')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'jbrd')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'xml ')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'jxlp')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'xtra')
+
+  @unittest.skipIf(not boxcutter.HAVE_BROTLI, 'Brotli not supported')
+  def testPassthroughCompressSpecific(self):
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      compOpts = boxcutter.CompressionOpts(decompressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS,
+                 decompressBoxes=boxcutter.boxspecStringsToBoxspecList(['type=xml ','i=0']))
+      self.assertEqual(boxcutter.doFilter(src, dst, True, None, compOpts), 0)
+      dst.seek(0)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'JXL ')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'ftyp')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'jxlp')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'jbrd')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobExif')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'xml ')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'jxlp')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'xtra')
+
+class TestFilterWithCompressionAndDecompression(unittest.TestCase):
+
+  @unittest.skipIf(not boxcutter.HAVE_BROTLI, 'Brotli not supported')
+  def testRemoveAndCompressAndDecompress(self):
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      # Swap compressed / decompressed boxes
+      compOpts = boxcutter.CompressionOpts(decompressWhen=boxcutter.CompressionOpts.DECOMPRESS_ALWAYS,
+                                           compressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS, protectJxl=False)
+      self.assertEqual(boxcutter.doFilter(src, dst, False, ['type=Exif'], compOpts), 0)
+      dst.seek(0)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobJXL ')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobftyp')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobjxlp')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobjbrd')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'xml ')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobjxlp')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobxtra')
+
+    with open(f'{TESTFILES}/pixel.jpg.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      # Swap compressed / decompressed boxes
+      compOpts = boxcutter.CompressionOpts(decompressWhen=boxcutter.CompressionOpts.DECOMPRESS_ALWAYS,
+                                           decompressBoxes=boxcutter.boxspecStringsToBoxspecList(['type=Exif']),
+                                           compressWhen=boxcutter.CompressionOpts.COMPRESS_ALWAYS,
+                                           compressBoxes=boxcutter.boxspecStringsToBoxspecList(['type=ftyp']),
+                                           protectJxl=False)
+      self.assertEqual(boxcutter.doFilter(src, dst, False, ['type=jxlp'], compOpts), 0)
+      dst.seek(0)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'JXL ')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobftyp')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'jbrd')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'Exif')
+      dst.seek(boxLen - 8, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(8), b'brobxml ')
+      dst.seek(boxLen - 12, io.SEEK_CUR)
+      (boxLen,) = struct.unpack('>I', dst.read(4))
+      self.assertEqual(dst.read(4), b'xtra')
 
 class TestIsValid4cc(unittest.TestCase):
   def testIsValid4cc(self):
@@ -575,6 +838,50 @@ class TestDecodeSize(unittest.TestCase):
           boxcutter.decodeSize(arg)
       else:
         self.assertEqual(boxcutter.decodeSize(arg), expect, msg=arg)
+
+class TestList(unittest.TestCase):
+  def testDoList(self):
+    with io.StringIO() as capturedStdout:
+      origStdout = sys.stdout
+      try:
+        sys.stdout = capturedStdout
+        boxcutter.doList([f'{TESTFILES}/various-boxes.4cc'])
+      finally:
+        sys.stdout = origStdout
+      self.assertEqual(capturedStdout.getvalue(), """\
+seq off    len type
+-------------------
+[0] 0x000    8 AAAA
+[1] 0x008   11 BBBB
+[2] 0x013   21 CCCC *
+[3] 0x028  +34 DDDD
+
+  *Unnecessary use of extended box size wastes 8 bytes.
+""")
+
+    with io.StringIO() as capturedStdout:
+      origStdout = sys.stdout
+      try:
+        sys.stdout = capturedStdout
+        boxcutter.doList([f'{TESTFILES}/pixel-jxlc.jxl',
+                          f'{TESTFILES}/pixel-jxlp-single.jxl'])
+      finally:
+        sys.stdout = origStdout
+      self.assertEqual(capturedStdout.getvalue(), f"""\
+{TESTFILES}/pixel-jxlc.jxl:
+seq off    len type
+-------------------
+[0] 0x000   12 JXL 
+[1] 0x00c   20 ftyp
+[2] 0x020   27 jxlc
+
+{TESTFILES}/pixel-jxlp-single.jxl:
+seq off    len type
+-------------------
+[0] 0x000   12 JXL 
+[1] 0x00c   20 ftyp
+[2] 0x020   31 jxlp
+""")
 
 if __name__ == '__main__':
     unittest.main()
