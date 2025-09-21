@@ -142,7 +142,7 @@ options:
                         Box specifier. May be given multiple times. The first box that matches any specifier is extracted.
 ```
 
-See also: [Brotli compression / decompression options](#brotli-compression-decompression-options).
+See also: [Brotli compression / decompression options](#brotli-compression--decompression-options).
 
 Example:
 
@@ -275,7 +275,7 @@ options:
                        the text value using this character encoding. Default is UTF-8.
 ```
 
-See also: [Brotli compression / decompression options](#brotli-compression-decompression-options).
+See also: [Brotli compression / decompression options](#brotli-compression--decompression-options).
 
 Example:
 
@@ -369,7 +369,7 @@ options:
   --keep BOXSPEC  Keep only the specified box(es).
 ```
 
-See also: [Brotli compression / decompression options](#brotli-compression-decompression-options).
+See also: [Brotli compression / decompression options](#brotli-compression--decompression-options).
 
 Other than printing warnings in certain cases, `filter` mode makes no attempt to stop you
 creating invalid JPEG XL files, which is easy to do by removing critical boxes.
