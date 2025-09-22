@@ -883,5 +883,65 @@ seq off    len type
 [2] 0x020   31 jxlp
 """)
 
+class TestMergeJxlps(unittest.TestCase):
+
+  def testMerge(self):
+    for before,after,codestream in (
+      # Unchanged
+      (b'',)*2 + (None,),
+      (b'\0\0\0\x0cjxlp\x80\0\0\0',)*2 + (b'',),
+      (b'\0\0\0\x08jxlc',)*2 + (b'',),
+      (b'\0\0\0\x0djxlp\0\0\0\0y\0\0\0\x09ASDFx\0\0\0\x0djxlp\x80\0\0\x01z',)*2 + (b'yz',),
+      (b'\0\0\0\x0djxlp\0\0\0\0y\0\0\0\x09ASDFx\0\0\0\x0djxlp\x80\0\0\x01z\0\0\0\x08GHJK',)*2 + (b'yz',),
+      # All merged into 1
+      (b'\0\0\0\x0cjxlp\0\0\0\0\0\0\0\x0cjxlp\x80\0\0\x01',
+       b'\0\0\0\x0cjxlp\x80\0\0\0', b''),
+      (b'\0\0\0\x0djxlp\0\0\0\0A\0\0\0\x0djxlp\x80\0\0\x01B',
+       b'\0\0\0\x0ejxlp\x80\0\0\0AB', b'AB'),
+      (b'\0\0\0\x0djxlp\0\0\0\0A\0\0\0\x0ejxlp\0\0\0\x01BC\0\0\0\x0fjxlp\x80\0\0\x02DEF', b'\0\0\0\x12jxlp\x80\0\0\0ABCDEF', b'ABCDEF'),
+      # Single run at end
+      (b'\0\0\0\x08XXXX\0\0\0\x0djxlp\0\0\0\0A\0\0\0\x0djxlp\x80\0\0\x01B',
+       b'\0\0\0\x08XXXX\0\0\0\x0ejxlp\x80\0\0\0AB', b'AB'),
+      # Single run at start
+      (b'\0\0\0\x0djxlp\0\0\0\0A\0\0\0\x0ejxlp\0\0\0\x01BC\0\0\0\x0djxlp\x80\0\0\x02D\0\0\0\x09XXXXx',
+       b'\0\0\0\x10jxlp\x80\0\0\0ABCD\0\0\0\x09XXXXx', b'ABCD'),
+      # Single run in middle
+      (b'\0\0\0\x0b1111one\0\0\0\x0djxlp\0\0\0\0y\0\0\0\x0djxlp\x80\0\0\x01z\0\0\0\x0b2222two',
+       b'\0\0\0\x0b1111one\0\0\0\x0ejxlp\x80\0\0\0yz\0\0\0\x0b2222two', b'yz'),
+      # With a gap
+      (b'\0\0\0\x0djxlp\0\0\0\0A\0\0\0\x0b1111one\0\0\0\x0djxlp\0\0\0\x01B\0\0\0\x0djxlp\x80\0\0\x02C',
+       b'\0\0\0\x0djxlp\0\0\0\0A\0\0\0\x0b1111one\0\0\0\x0ejxlp\x80\0\0\x01BC', b'ABC'),
+      # Multiple runs
+      (b'\0\0\0\x0djxlp\0\0\0\0A\0\0\0\x0djxlp\0\0\0\x01B\0\0\0\x0b1111one\0\0\0\x0djxlp\0\0\0\x02C\0\0\0\x0djxlp\x80\0\0\x03D',
+       b'\0\0\0\x0ejxlp\0\0\0\0AB\0\0\0\x0b1111one\0\0\0\x0ejxlp\x80\0\0\x01CD', b'ABCD'),
+      ):
+      with io.BytesIO(before) as src, \
+           io.BytesIO() as dst:
+        self.assertEqual(boxcutter.mergeJxlps(src, dst), 0)
+        self.assertEqual(dst.getvalue(), after, msg=dst.getvalue())
+
+        # Make sure the extracted codestream is unchanged
+        if len(before) > 0:
+          with io.BytesIO() as container1, \
+               io.BytesIO() as container2, \
+               io.BytesIO() as codestream1, \
+               io.BytesIO() as codestream2:
+            container1.write(boxcutter.JXL_CONTAINER_SIG)
+            container1.write(src.getvalue())
+            container1.seek(0)
+            container2.write(boxcutter.JXL_CONTAINER_SIG)
+            container2.write(dst.getvalue())
+            container2.seek(0)
+            self.assertEqual(boxcutter.extractJxlCodestream(container1, codestream1), 0)
+            self.assertEqual(codestream1.getvalue(), codestream)
+            self.assertEqual(boxcutter.extractJxlCodestream(container2, codestream2), 0)
+            self.assertEqual(codestream2.getvalue(), codestream)
+
+  def testUnseekableOutput(self):
+    with io.BytesIO(b'\0\0\0\x0cjxlp\x80\0\0\0') as src, \
+         io.BytesIO() as dst:
+      dst.seekable = lambda : False
+      self.assertRaises(boxcutter.UnseekableOutputError, boxcutter.mergeJxlps, src, dst)
+
 if __name__ == '__main__':
     unittest.main()

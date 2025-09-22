@@ -244,6 +244,59 @@ precedes any metadata such as Exif or XMP, while still keeping that metadata clo
 start of the file.  Unlike libjxl, we have no way of identifying the appropriate split
 point!
 
+#### `merge-jxlps`
+Combines runs of adjacent `jxlp` boxes into single `jxlp` boxes.
+
+Usage:
+
+```
+boxcutter.py merge-jxlps [infile] [outfile]
+```
+
+Example:
+
+```
+$ boxcutter.py merge-jxlps multijxlp.jxl singlejxlp.jxl
+
+$ boxcutter.py list multijxlp.jxl singlejxlp.jxl
+
+multijxlp.jxl:
+seq off    len type
+-------------------
+[0] 0x000   12 JXL 
+[1] 0x00c   20 ftyp
+[2] 0x020   12 jxlp
+[2] 0x02c   16 meta
+[3] 0x03c   20 jxlp
+[4] 0x050   13 jxlp
+[5] 0x05d   12 jxlp
+[6] 0x069   14 jxlp
+[7] 0x077   20 jxlp
+
+singlejxlp.jxl:
+seq off    len type
+-------------------
+[0] 0x000   12 JXL 
+[1] 0x00c   20 ftyp
+[2] 0x020   12 jxlp
+[2] 0x02c   16 meta
+[3] 0x03c   31 jxlp
+```
+
+The JPEG XL codestream is unaffected:
+
+```
+$ ls -l multijxlp.jxl singlejxlp.jxl
+-rw-rw-r-- 1 usr grp  139 Mar 26 17:46 multijxlp.jxl
+-rw-rw-r-- 1 usr grp   91 Mar 26 17:46 singlejxlp.jxl
+
+$ boxcutter.py extract-jxl-codestream multijxlp.jxl | sha1sum
+af0c744bdbfcaa8f9ad248718f9b9eba64d35acb  -
+
+$ boxcutter.py extract-jxl-codestream singlejxlp.jxl | sha1sum
+af0c744bdbfcaa8f9ad248718f9b9eba64d35acb  -
+```
+
 #### `add`
 Adds arbitrary boxes to an existing file.  `--box` can be passed any number of times, and
 each one creates a box with the specified name and content.

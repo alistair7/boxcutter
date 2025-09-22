@@ -124,6 +124,9 @@ def main(argv):
   dropOrKeep.add_argument('--drop', metavar='BOXSPEC', action='append', help='Remove the specified box(es).')
   dropOrKeep.add_argument('--keep', metavar='BOXSPEC', action='append', help='Keep only the specified box(es).')
 
+  subparsers.add_parser('merge-jxlps', parents=[inOutParser],
+                        help='Merge consecutive jxlp boxes.')
+
   args = parser.parse_args(argv[1:])
 
   # Error on compression options if brotli unavailable
@@ -154,7 +157,8 @@ def main(argv):
       args.select.append(f'TYPE={args.boxtype}')
     return doCount(args.files, args.select, args.mode == 'has', verbose=args.verbose)
 
-  if args.mode in ('extract', 'extract-jxl-codestream', 'wrap-jxl-codestream', 'add', 'filter'):
+  if args.mode in ('extract', 'extract-jxl-codestream', 'wrap-jxl-codestream', 'add',
+                   'filter', 'merge-jxlps'):
     with openFileOrStdin(args.infile, 'rb') as infile, \
          openFileOrStdout(args.outfile, 'wb') as outfile:
       if args.mode == 'extract':
@@ -176,7 +180,7 @@ def main(argv):
                                    recompress = False,
                                    protectJxl = args.protect_jxl)
         return doAddBoxes(infile, outfile, args.box, args.encoding, compOpts, args.at)
-      else: # mode == 'filter'
+      if args.mode == 'filter':
         compOpts = CompressionOpts(effort = args.brotli_effort if args.brotli_effort is not None else DEFAULT_BROTLI_EFFORT,
                                    compressWhen = CompressionOpts.COMPRESS_AUTO if args.compress == 'auto' else \
                                                   CompressionOpts.COMPRESS_ALWAYS if args.compress == 'always' else \
@@ -191,6 +195,8 @@ def main(argv):
                         (args.keep is None and args.drop is None) or args.keep is not None,
                         args.keep if args.keep is not None else args.drop,
                         compOpts = compOpts)
+      if args.mode == 'merge-jxlps':
+        return mergeJxlps(infile, outfile)
 
   return 0
 
@@ -609,7 +615,7 @@ def doAddBoxes(infile, outfile, newboxes, encoding, compOpts=None, at=-1):
           else:
             if newBoxSize > BIG_SIZE:
               # TODO: Handle big boxes
-              sys.stderr.write(f'Adding (final) boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.\n')
+              raise ReallyBigBoxError(f'Adding (final) boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.')
             outfile.write(struct.pack('>I', newBoxSize))
           outfile.seek(boxEnd)
           break
@@ -785,6 +791,88 @@ def scanBoxes(src, dst, mode, boxspecs, compOpts):
          matchCount if mode == MODE_COUNT else \
          0
 
+def _fixJxlpSize(outfile, jxlpDetail, thisJxlpSequence, isLastJxlp):
+  """
+  Seek outfile to the box that starts at jxlpDetail.offset; set the size field to
+  jxlpDetail.length; if isLastJxlp, set the first bit in the the jxlp sequence number;
+  reset seek position.
+  """
+  bookmark = outfile.tell()
+  outfile.seek(jxlpDetail.offset)
+  if jxlpDetail.hasExtendedSize:
+    outfile.seek(8, io.SEEK_CUR)
+    outfile.write(struct.pack('>Q', jxlpDetail.length))
+  else:
+    if jxlpDetail.length > BIG_SIZE:
+      raise ReallyBigBoxError(f"Merging jxlp boxes created a {jxlpDetail.length}-byte box, which we can't fit in the size field.")
+    outfile.write(struct.pack('>I', jxlpDetail.length))
+
+  if isLastJxlp:
+    # Rewrite the jxlp sequence number with the "last jxlp" bit set
+    if not jxlpDetail.hasExtendedSize:
+      # Skip the type field
+      outfile.seek(4, io.SEEK_CUR)
+    outfile.write(struct.pack('>I', thisJxlpSequence|0x80000000))
+  outfile.seek(bookmark)
+
+def mergeJxlps(infile, outfile):
+  """
+  Copy boxes, merging together any adjacent jxlp boxes.
+
+  @param infile Open binary file-like object to read boxes from.  May be empty.
+  @param outfile Open, seekable, binary file-like object to write boxes to.
+  @return 0
+
+  Raises UnseekableOutputError if... the output is unseekable.
+  Raises some other BoxCutterException if the input is invalid.
+  """
+  if not outfile.seekable():
+    raise UnseekableOutputError('This operation requires the output file to be seekable')
+
+  skippedJxlpHeader = False
+  jxlpDetail = BoxDetails(offset=None, length=0, boxtype=b'jxlp', hasExtendedSize=False)
+  jxlpRunCount = 0
+  nextJxlpSequence = 0
+  isLastJxlp = False
+
+  with BoxReader(infile) as reader:
+    for i,box in enumerate(reader):
+      if box.boxtype == b'jxlp':
+        if jxlpRunCount > 0:
+          # Non-first jxlp of this run
+          # Skip the sequence number and copy the rest
+          isLastJxlp = (reader.readCurrentBoxPayload(4)[0] >> 7) == 1
+          jxlpDetail.length += reader.copyCurrentBoxPayload(outfile)
+          skippedJxlpHeader = True
+        else:
+          # First jxlp of this run - save position of the size field for later
+          jxlpDetail.offset = outfile.tell()
+          jxlpDetail.hasExtendedSize = box.hasExtendedSize
+          if skippedJxlpHeader:
+            # Adjust jxlp sequence number
+            jxlpDetail.length = writeBoxHeader(outfile, b'jxlp', box.length)
+            jxlpDetail.length += outfile.write(struct.pack('>I', nextJxlpSequence))
+            reader.seekCurrentBoxPayload(4)
+            jxlpDetail.length += reader.copyCurrentBoxPayload(outfile)
+          else:
+            # Straight copy
+            jxlpDetail.length = reader.copyCurrentBox(outfile)
+          nextJxlpSequence += 1
+        jxlpRunCount += 1
+      else:
+        if jxlpRunCount > 1:
+          # End jxlp run - go back and set the size
+          _fixJxlpSize(outfile, jxlpDetail, nextJxlpSequence-1, isLastJxlp)
+        # Straight copy
+        reader.copyCurrentBox(outfile)
+        jxlpDetail.offset = None
+        jxlpDetail.length = 0
+        jxlpRunCount = 0
+
+  if jxlpRunCount > 1:
+    _fixJxlpSize(outfile, jxlpDetail, nextJxlpSequence-1, isLastJxlp=True)
+  return 0
+
 def _copyAndDecompress(dst, reader, decompressMax):
   """
   Read Brotli-compressed bytes from the current box of @p reader (stream position should
@@ -916,8 +1004,7 @@ def _writeBoxes(outfile, boxes, encoding, compOpts, atEnd):
           newBoxSize = boxEnd - outBoxOffset
           if newBoxSize > BIG_SIZE and not isLastBox:
             # TODO: Handle big boxes
-            sys.stderr.write(f'Adding boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.\n')
-            return 1
+            raise ReallyBigBoxError(f'Adding boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.')
           if newBoxSize <= BIG_SIZE:
             outfile.write(struct.pack('>I', newBoxSize))
             outfile.seek(boxEnd)
@@ -934,8 +1021,7 @@ def _writeBoxes(outfile, boxes, encoding, compOpts, atEnd):
         newBoxSize = boxEnd - outBoxOffset
         if newBoxSize > BIG_SIZE and not isLastBox:
           # TODO: Handle big boxes
-          sys.stderr.write(f'Adding boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.\n')
-          return 1
+          raise ReallyBigBoxError(f'Adding boxes larger than 0x{BIG_SIZE:X} bytes is not supported yet.')
         if newBoxSize <= BIG_SIZE:
           outfile.write(struct.pack('>I', newBoxSize))
           outfile.seek(boxEnd)
@@ -1145,6 +1231,10 @@ class UnseekableOutputError(BoxCutterException):
 
 class TooMuchDataError(BoxCutterException):
   """Operation produced more output than allowed."""
+  pass
+
+class ReallyBigBoxError(BoxCutterException):
+  """A box required the use of an extended size field, and we didn't leave enough space."""
   pass
 
 class BoxDetails:
