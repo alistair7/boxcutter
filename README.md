@@ -1,10 +1,10 @@
 # boxcutter
-Utility for examining and manipulating JPEG XL container files (ISO/IEC 18181-2).
+Utility for examining and manipulating JPEG XL container files (ISO/IEC 18181-2).
 
 This project will hopefully be made redundant by libjxl's planned
 [`jxltran`](https://github.com/libjxl/libjxl/issues/871) utility.
 
-While this is mainly intended for processing JPEG XL files, it can also deal with other
+While this is mainly intended for processing JPEG XL files, it can also deal with other
 "ISO-BMFF-like" formats that use the 4CC box structure, whether or not they strictly
 conform to ISO/IEC 14496-12.  e.g., MP4, HEIF (HEIC, AVIF), JPEG2000.
 
@@ -28,7 +28,7 @@ two positional arguments for the input and output file names.  If these are omit
 set to '-', standard input and standard output are used.
 
 ### JPEG-XL-specific Features
-A JPEG XL file can be a "raw" codestream, or stored in a container format allowing extra
+A JPEG XL file can be a "raw" codestream, or stored in a container format allowing extra
 information such as metadata to be included.
 
 boxcutter can:
@@ -37,7 +37,7 @@ boxcutter can:
   ([`extract-jxl-codestream`](#extract-jxl-codestream)).
 - Wrap a raw JXL codestream in the container format
   ([`wrap-jxl-codestream`](#wrap-jxl-codestream)).
-- Generate certain optional boxes that are meaningful to JPEG XL decoders (specifically,
+- Generate certain optional boxes that are meaningful to JPEG XL decoders (specifically,
   `jxll`).
 - Identify JXLs that contain JPEG reconstruction data (via `has --select=TYPE=jbrd`).
 
@@ -283,7 +283,7 @@ seq off    len type
 [3] 0x03c   31 jxlp
 ```
 
-The JPEG XL codestream is unaffected:
+The JPEG XL codestream is unaffected:
 
 ```
 $ ls -l multijxlp.jxl singlejxlp.jxl
@@ -425,7 +425,7 @@ options:
 See also: [Brotli compression / decompression options](#brotli-compression--decompression-options).
 
 Other than printing warnings in certain cases, `filter` mode makes no attempt to stop you
-creating invalid JPEG XL files, which is easy to do by removing critical boxes.
+creating invalid JPEG XL files, which is easy to do by removing critical boxes.
 
 There are several examples of how `filter` is used in the Box Specifiers section.
 
@@ -503,7 +503,7 @@ $ boxcutter.py filter --drop 'itype~=jxl*' in.jxl > out.jxl
 ```
 
 #### Convenience filters
-The special box specifier, `@jxl`, matches a minimal set of reserved JPEG XL boxes,
+The special box specifier, `@jxl`, matches a minimal set of reserved JPEG XL boxes,
 equivalent to specifying `itype~=jxl*` and `type=ftyp`.  This does not include `jbrd`,
 `Exif`, `'xml '`, or `jumb`.
 
