@@ -359,7 +359,8 @@ def doCount(filenames, boxspecStrings, justCheck, verbose=False, out=sys.stdout)
       usedStdin = True
 
     with openFileOrStdin(filename, 'rb') as src:
-      count = scanBoxes(src, dst=None, mode=mode, boxspecs=boxspecs)
+      count = scanBoxes(src, dst=None, mode=mode, boxspecs=boxspecs,
+                        compOpts=CompressionOpts())
     if count < 0:
       if count == RAW_JXL:
         sys.stderr.write(f'{shlex.quote(filename)}: Raw JXL codestream - not a container.\n')
