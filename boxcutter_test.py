@@ -122,18 +122,16 @@ class TestCount(unittest.TestCase):
                          boxcutter.FAILED_PARSE, msg=f'mode={mode}')
         jxl.seek(0)
     with io.BytesIO(b'\0\0\0\x09ABCD\0\0\0\x09EFGH\t') as jxl:
-      # Count notices the corrupt second box, Has stops early and doesn't.
       for mode,expect in ((boxcutter.MODE_COUNT, boxcutter.FAILED_PARSE),
-                          (boxcutter.MODE_HAS, 1)):
+                          (boxcutter.MODE_HAS, boxcutter.FAILED_PARSE)):
         self.assertEqual(boxcutter.doScanBoxes(jxl, None, mode, None), expect,
                          msg=f'mode={mode}')
         jxl.seek(0)
     with io.BytesIO(b'\0\0\0\x09ABCD\0\0\0\x09EFGHx') as jxl:
-      # Weird, but OK - parser is satisfied with 'FGHx' type, and doesn't read past the
-      # box header, so doesn't notice the file is way too short.
-      for mode,expect in ((boxcutter.MODE_COUNT,2), (boxcutter.MODE_HAS,1)):
-        self.assertEqual(boxcutter.doScanBoxes(jxl, None, mode, None), expect,
-                         msg=f'mode={mode}')
+      # Malformed - MODE_HAS stops after reading the first box, so doesn't detect a problem.
+      for mode,expect in ((boxcutter.MODE_COUNT,boxcutter.FAILED_PARSE),
+                          (boxcutter.MODE_HAS,1)):
+        self.assertEqual(boxcutter.doScanBoxes(jxl, None, mode, None), expect)
         jxl.seek(0)
 
 class TestExtractBox(unittest.TestCase):

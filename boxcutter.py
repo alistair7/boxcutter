@@ -778,7 +778,13 @@ def scanBoxes(src, dst, mode, boxspecs, compOpts):
               writtenFinalBox = True
 
         elif mode in (MODE_COUNT, MODE_HAS) and matches:
-          if mode == MODE_HAS: return 1
+          if mode == MODE_HAS:
+            # Verify that this box is followed by a valid header or EOF.
+            try:
+              reader.__next__()
+            except StopIteration:
+              pass
+            return 1
           matchCount += 1
 
         seen[innerType] += 1
@@ -1265,7 +1271,7 @@ class BoxDetails:
 
 class BoxReader:
   __slots__ = ['_filename', '_file', '_index', '_currentBoxDetail', '_currentBoxHeader',
-               '_nextBoxOffset', '_eof', '_off', '_doneIter', '_ourFile',
+               '_nextBoxOffset', '_eof', '_off', '_doneIter', '_ourFile', '_size',
                '_clientBoxDataOffset','_clientIsReadingFull','_clientIsReadingPayload']
 
   def __init__(self, source):
@@ -1292,6 +1298,7 @@ class BoxReader:
     else:
       self._ourFile = False
       self._file = source
+    self._size = streamSize(self._file)
     self._index = -1
     self._currentBoxDetail = None
     self._currentBoxHeader = None
@@ -1402,7 +1409,6 @@ class BoxReader:
     if self._currentBoxDetail.length > 0: return self._currentBoxDetail.length
 
     while True:
-      # seek/_seekBy will go past EOF, so never finds the end.
       block = self._read(IO_BLOCK_SIZE, allowShort=True)
       if len(block) < IO_BLOCK_SIZE:
         self._currentBoxDetail.length = self._off - self._currentBoxDetail.offset
@@ -1561,9 +1567,17 @@ class BoxReader:
     If the file isn't seekable (and count is positive), @p count bytes are read and
     discarded.  self._off is updated to reflect the new stream position.
 
-    @return the number of bytes skipped.
+    @param[in] exact If true, always seek the full amount or raise InvalidBmffError.
+
+    @return the number of bytes skipped, which may be less than @p count if we reach EOF.
     """
     if self._file.seekable():
+      if self._size >= 0:
+        remain = self._size - self._off
+        if remain < count:
+          if exact:
+            raise InvalidBmffError(f"_seekBy: tried to seek {count} bytes but hit EOF.")
+          count = remain
       self._file.seek(count, io.SEEK_CUR)
       self._off += count
       return count
