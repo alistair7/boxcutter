@@ -166,7 +166,7 @@ class TestExtractBox(unittest.TestCase):
          io.BytesIO() as dst1, io.BytesIO() as dst2:
       self.assertEqual(boxcutter.doExtractBox(src, dst1, ['type=jxlc']), 0)
       src.seek(0)
-      self.assertEqual(boxcutter.extractJxlCodestream(src, dst2), 0)
+      self.assertEqual(boxcutter.extractJxlCodestream(src, dst2, False), 0)
       self.assertEqual(dst1.getvalue(), dst2.getvalue())
 
   def testDecompressBox(self):
@@ -215,10 +215,18 @@ class TestExtractCodestream(unittest.TestCase):
     with open(f'{TESTFILES}/pixel-raw.jxl', 'rb') as raw:
       self.jxlcodestream = raw.read()
 
+  def testAlreadyACodestream(self):
+    with io.BytesIO(self.jxlcodestream) as src, \
+         io.BytesIO() as dst:
+      self.assertNotEqual(boxcutter.extractJxlCodestream(src, dst, False), 0)
+      src.seek(0)
+      self.assertEqual(boxcutter.extractJxlCodestream(src, dst, True), 0)
+      self.assertEqual(dst.getvalue(), self.jxlcodestream)
+
   def testJxlc(self):
     with open(f'{TESTFILES}/pixel-jxlc.jxl', 'rb') as jxl, \
          io.BytesIO() as result:
-      self.assertEqual(boxcutter.extractJxlCodestream(jxl, result), 0)
+      self.assertEqual(boxcutter.extractJxlCodestream(jxl, result, False), 0)
       self.assertEqual(result.getvalue(), self.jxlcodestream)
 
   def testJxlp(self):
@@ -226,14 +234,14 @@ class TestExtractCodestream(unittest.TestCase):
       fname = f'{TESTFILES}/pixel-jxlp-{suffix}.jxl'
       with open(fname, 'rb') as jxl, \
            io.BytesIO() as result:
-        self.assertEqual(boxcutter.extractJxlCodestream(jxl, result), 0)
+        self.assertEqual(boxcutter.extractJxlCodestream(jxl, result, False), 0)
         self.assertEqual(result.getvalue(), self.jxlcodestream,
                          msg=f'Failed to get correct codestream from {fname}')
 
   def testJxlpWrongSequence(self):
     with open(f'{TESTFILES}/pixel-jxlp-badsequence.jxl', 'rb') as jxl, \
          io.BytesIO() as result:
-      self.assertNotEqual(boxcutter.extractJxlCodestream(jxl, result), 0)
+      self.assertNotEqual(boxcutter.extractJxlCodestream(jxl, result, False), 0)
 
 
 class TestWrapCodestream(unittest.TestCase):
@@ -242,6 +250,23 @@ class TestWrapCodestream(unittest.TestCase):
     with open(f'{TESTFILES}/pixel-raw.jxl', 'rb') as raw:
       self.jxlcodestream = raw.read()
 
+  def testAlreadyAContainer(self):
+    with open(f'{TESTFILES}/pixel-jxlc.jxl', 'rb') as src, \
+         io.BytesIO() as dst:
+      original = src.read()
+
+      src.seek(0)
+      self.assertNotEqual(boxcutter.addContainer(src, dst, ifNeeded=False), 0)
+      src.seek(0)
+      self.assertEqual(boxcutter.addContainer(src, dst, ifNeeded=True), 0)
+      self.assertEqual(dst.getvalue(), original)
+      src.seek(0)
+      dst.seek(0)
+      dst.truncate()
+      self.assertEqual(boxcutter.addContainer(src, dst, ifNeeded=True,
+                                              jxll=10, splits=[5]), 0)
+      self.assertEqual(dst.getvalue(), original)
+
   def testJxlc(self):
     with open(f'{TESTFILES}/pixel-jxlc.jxl', 'rb') as f:
       expect = f.read()
@@ -249,7 +274,7 @@ class TestWrapCodestream(unittest.TestCase):
     with io.BytesIO(self.jxlcodestream) as src, \
          io.BytesIO() as dst:
       src.seek(0)
-      self.assertEqual(boxcutter.addContainer(src, dst), 0)
+      self.assertEqual(boxcutter.addContainer(src, dst, False), 0)
       self.assertEqual(dst.getvalue(), expect)
 
     expect = boxcutter.JXL_CONTAINER_SIG + \
@@ -261,7 +286,7 @@ class TestWrapCodestream(unittest.TestCase):
     with io.BytesIO(self.jxlcodestream) as src, \
          io.BytesIO() as dst:
       src.seek(0)
-      self.assertEqual(boxcutter.addContainer(src, dst, jxll=10), 0)
+      self.assertEqual(boxcutter.addContainer(src, dst, False, jxll=10), 0)
       self.assertEqual(dst.getvalue(), expect)
 
   def testJxlpSensible(self):
@@ -270,7 +295,7 @@ class TestWrapCodestream(unittest.TestCase):
     with io.BytesIO(self.jxlcodestream) as src, \
          io.BytesIO() as dst:
       src.seek(0)
-      self.assertEqual(boxcutter.addContainer(src, dst, splits=[8]), 0)
+      self.assertEqual(boxcutter.addContainer(src, dst, False, splits=[8]), 0)
       self.assertEqual(dst.getvalue(), expect)
 
   def testJxlpStupid(self):
@@ -280,7 +305,7 @@ class TestWrapCodestream(unittest.TestCase):
     with io.BytesIO(self.jxlcodestream) as src, \
          io.BytesIO() as dst:
       src.seek(0)
-      self.assertEqual(boxcutter.addContainer(src, dst, splits=[]), 0)
+      self.assertEqual(boxcutter.addContainer(src, dst, False, splits=[]), 0)
       self.assertEqual(dst.getvalue(), expect)
 
     with open(f'{TESTFILES}/pixel-jxlp-stupid.jxl', 'rb') as f:
@@ -289,7 +314,8 @@ class TestWrapCodestream(unittest.TestCase):
     with io.BytesIO(self.jxlcodestream) as src, \
          io.BytesIO() as dst:
       src.seek(0)
-      self.assertEqual(boxcutter.addContainer(src, dst, splits=[0,8,9,11,9]), 0)
+      self.assertEqual(boxcutter.addContainer(src, dst, False,
+                                              splits=[0,8,9,11,9]), 0)
       self.assertEqual(dst.getvalue(), expect)
 
 
@@ -930,9 +956,11 @@ class TestMergeJxlps(unittest.TestCase):
             container2.write(boxcutter.JXL_CONTAINER_SIG)
             container2.write(dst.getvalue())
             container2.seek(0)
-            self.assertEqual(boxcutter.extractJxlCodestream(container1, codestream1), 0)
+            self.assertEqual(boxcutter.extractJxlCodestream(container1, codestream1,
+                                                            False), 0)
             self.assertEqual(codestream1.getvalue(), codestream)
-            self.assertEqual(boxcutter.extractJxlCodestream(container2, codestream2), 0)
+            self.assertEqual(boxcutter.extractJxlCodestream(container2, codestream2,
+                                                            False), 0)
             self.assertEqual(codestream2.getvalue(), codestream)
 
   def testUnseekableOutput(self):

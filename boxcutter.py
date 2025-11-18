@@ -100,9 +100,11 @@ def main(argv):
 
   extractJxlParser = subparsers.add_parser('extract-jxl-codestream', parents=[inOutParser],
                                            help='Extract the raw JPEG XL codestream from a JXL container file.')
+  extractJxlParser.add_argument('--if-needed', action='store_true', help='If the input is already a raw JXL codestream, just copy it.')
 
   wrapJxlParser = subparsers.add_parser('wrap-jxl-codestream', parents=[inOutParser],
                                         help='Wrap a raw JPEG XL codestream in a simple ISO/IEC 18181-2 "BMFF-like" container.')
+  wrapJxlParser.add_argument('--if-needed', action='store_true', help='If the input is already a JXL container, just copy it.')
   wrapJxlParser.add_argument('--level', '-l', type=int, metavar='N', help='Add a codestream level declaration to the file, for level N (adds a `jxll` box to the output).')
   wrapJxlParser.add_argument('--splits', '-s', metavar='OFFSET,OFFSET,...', help='Write several `jxlp` boxes instead of a single `jxlc` box, splitting the codestream at these byte offsets.')
 
@@ -167,10 +169,10 @@ def main(argv):
                                    decompressMax = decodeSize(args.decompress_max) if args.decompress_max else DEFAULT_DECOMP_MAX)
         return doExtractBox(infile, outfile, args.select, compOpts)
       if args.mode == 'extract-jxl-codestream':
-        return extractJxlCodestream(infile, outfile)
+        return extractJxlCodestream(infile, outfile, args.if_needed)
       if args.mode == 'wrap-jxl-codestream':
         splits = map(int, args.splits.split(',')) if args.splits else [] if args.splits is not None else None
-        return addContainer(infile, outfile, jxll = args.level, splits=splits)
+        return addContainer(infile, outfile, args.if_needed, jxll = args.level, splits=splits)
       if args.mode == 'add':
         compOpts = CompressionOpts(effort = args.brotli_effort if args.brotli_effort is not None else DEFAULT_BROTLI_EFFORT,
                                    compressWhen = CompressionOpts.COMPRESS_AUTO if args.compress == 'auto' else \
@@ -383,11 +385,20 @@ def doCount(filenames, boxspecStrings, justCheck, verbose=False, out=sys.stdout)
 
 
 
-def extractJxlCodestream(src, dst):
+def extractJxlCodestream(src, dst, ifNeeded):
 
   jxlBox = src.read(len(JXL_CONTAINER_SIG))
   if jxlBox != JXL_CONTAINER_SIG:
-    sys.stderr.write('Input file is not a JPEG XL container.\n')
+    if jxlBox[:2] == b'\xff\n':
+      sys.stderr.write('Input file is already a raw JXL codestream')
+      if ifNeeded:
+        sys.stderr.write(' - will just copy it.\n')
+        dst.write(jxlBox)
+        copyData(src, dst, None)
+        return 0
+      sys.stderr.write('.\n')
+    else:
+      sys.stderr.write('Input file is not a JPEG XL container.\n')
     return 1
 
   seenJxlc = False
@@ -498,7 +509,7 @@ def decodeSize(sz):
          1
   return mult * int(match.group(1))
 
-def addContainer(src, dst, jxll=None, splits=None):
+def addContainer(src, dst, ifNeeded, jxll=None, splits=None):
   """
   @param[in] splits If not None, this must be an iterable of ints giving byte offsets at
                     which the JXL codestream should be split.  If this is provided, the
@@ -509,7 +520,14 @@ def addContainer(src, dst, jxll=None, splits=None):
   jxlSig = src.read(2) # Effectively peeking, so don't decrement codestreamBytesRemain
   if jxlSig != b'\xff\n':
     if jxlSig == JXL_CONTAINER_SIG[:2] and src.read(len(JXL_CONTAINER_SIG)-2) == JXL_CONTAINER_SIG[2:]:
-      sys.stderr.write('Input is already in a container.\n')
+      sys.stderr.write('Input is already in a container')
+      if ifNeeded:
+        sys.stderr.write(' - will just copy it.\n')
+        dst.write(JXL_CONTAINER_SIG)
+        copyData(src, dst, None)
+        return 0
+      else:
+        sys.stderr.write('.\n')
     return 1
 
   # Always start with 'JXL ' and 'ftyp'

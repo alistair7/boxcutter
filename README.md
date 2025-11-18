@@ -158,6 +158,17 @@ If no matching box is found, or no box specifier is given, boxcutter exits with 
 #### `extract-jxl-codestream`
 Converts a JXL container to a raw JXL codestream.
 
+Usage:
+
+```
+boxcutter.py extract-jxl-codestream [--if-needed] [infile] [outfile]
+
+  --if-needed  If the input is already a raw JXL codestream, just copy it.
+
+```
+
+Example:
+
 ```
 $ boxcutter.py extract-jxl-codestream < container.jxl > raw.jxl
 
@@ -184,6 +195,7 @@ Usage:
 boxcutter.py wrap-jxl-codestream [--level N] [--splits OFFSET,OFFSET,...] [infile] [outfile]
 
 options:
+  --if-needed           If the input is already a JXL container, just copy it.
   --level N, -l N       Add a codestream level declaration to the file, for level N (adds a `jxll` box to the output).
   --splits OFFSET,OFFSET,..., -s OFFSET,OFFSET,...
                         Write several `jxlp` boxes instead of a single `jxlc` box, splitting the codestream at these byte offsets.
